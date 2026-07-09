@@ -1,0 +1,1070 @@
+#!/usr/bin/env python3
+"""fleet — CLI proxy node manager backed by sing-box.
+
+Two modes:
+  proxy   HTTP/SOCKS on 127.0.0.1:7890   (no root, also sets macOS system proxy)
+  tun     System-wide TUN + fake-IP DNS  (needs sudo, transparent for Docker)
+
+Usage:
+  fleet refresh                   Parse Clash config
+  fleet list                      List all nodes
+  fleet ping [node]               Test node latency (TCP)
+
+  fleet proxy start <node>        Start proxy mode
+  fleet proxy stop                Stop proxy mode
+  fleet proxy switch <node>       Switch node (proxy mode)
+
+  fleet tun start <node>          Start TUN mode (sudo)
+  fleet tun stop                  Stop TUN mode (sudo)
+  fleet tun switch <node>         Switch node (TUN mode, sudo)
+
+  fleet start <node>              Smart start (proxy mode default)
+  fleet stop                      Stop whatever is running
+  fleet status                    Show all modes
+  fleet switch <node>             Switch in active mode
+"""
+
+import json
+import os
+import signal
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+
+def _env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if not value:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        print(f"Warning: ignoring invalid {name}={value!r}")
+        return default
+
+
+CONFIG_DIR = Path.home() / ".config/fleet"
+NODES_FILE = CONFIG_DIR / "nodes.json"
+STATE_FILE = CONFIG_DIR / "state.json"
+SING_BOX_CONFIG = CONFIG_DIR / "sing-box.json"
+SING_BOX_LOG = CONFIG_DIR / "sing-box.log"
+SING_BOX_BIN = "/opt/homebrew/bin/sing-box"
+CLASH_CONFIG = Path.home() / "Library/Application Support/com.follow.clash/config.yaml"
+PROXY_HOST = "127.0.0.1"
+PROXY_PORT = _env_int("FLEET_PORT", 7890)
+TUN_ADDR = "172.19.0.1/30"
+TUN_IFACE = ""
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# YAML parser
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def parse_clash_config(path: str) -> Dict[str, Any]:
+    ruby_config = _parse_yaml_with_ruby(path)
+    if ruby_config is not None:
+        return {
+            "proxies": ruby_config.get("proxies") or [],
+            "proxy_groups": ruby_config.get("proxy-groups") or [],
+        }
+
+    with open(path) as f:
+        lines = f.readlines()
+
+    proxies: List[Dict] = []
+    proxy_groups: List[Dict] = []
+    in_proxies = False
+    in_groups = False
+    current: Optional[Dict[str, Any]] = None
+    current_group: Optional[Dict[str, Any]] = None
+    current_key = ""
+    indent = 0
+
+    def flush():
+        nonlocal current, current_key
+        if current is not None and "name" in current:
+            proxies.append(current)
+        current = None
+        current_key = ""
+
+    for line in lines:
+        raw = line.rstrip()
+        if not raw or raw.strip().startswith("#"):
+            continue
+
+        stripped = raw.lstrip()
+        col = len(raw) - len(stripped)
+
+        if stripped.startswith("proxies:") and col == 0:
+            flush()
+            in_proxies = True
+            in_groups = False
+            continue
+        if stripped.startswith("proxy-groups:") and col == 0:
+            flush()
+            in_proxies = False
+            in_groups = True
+            indent = 0
+            continue
+        if col == 0 and in_proxies and not stripped.startswith(" "):
+            in_proxies = False
+
+        if in_proxies:
+            if stripped.startswith("- ") and col <= 2:
+                flush()
+                current = {}
+                key_val = stripped[2:]
+                if ":" in key_val:
+                    k, v = key_val.split(":", 1)
+                    k = k.strip()
+                    v = v.strip().strip('"')
+                    current[k] = _smart_value(v)
+                indent = col
+            elif current is not None and col > indent:
+                if ":" in stripped:
+                    k, v = stripped.split(":", 1)
+                    k = k.strip()
+                    v = v.strip().strip('"')
+                    target = current
+                    if current_key and isinstance(current.get(current_key), dict):
+                        target = current[current_key]
+                    if v == "":
+                        target[k] = {}
+                        current_key = k
+                    else:
+                        target[k] = _smart_value(v)
+                        if not (current_key and isinstance(current.get(current_key), dict)):
+                            current_key = ""
+                elif current_key and isinstance(current.get(current_key), dict) and ":" in stripped:
+                    k, v = stripped.split(":", 1)
+                    current[current_key][k.strip()] = v.strip().strip('"')
+                elif current_key == "alpn":
+                    current.setdefault("alpn", []).append(stripped.strip().strip('"').lstrip("- "))
+
+        if in_groups:
+            if stripped.startswith("- name:") and col <= 2:
+                current_group = {"name": stripped[2:].split(":", 1)[1].strip().strip('"'),
+                                 "proxies": [], "type": "select"}
+                proxy_groups.append(current_group)
+                indent = col
+            elif current_group is not None and col > indent:
+                if stripped.startswith("proxies:"):
+                    pass
+                elif stripped.startswith("- ") and not any(stripped[2:].strip().startswith(p) for p in ("type:", "url:", "interval:", "tolerance:")):
+                    current_group["proxies"].append(stripped[2:].strip().strip('"'))
+                elif stripped.startswith("type:"):
+                    current_group["type"] = stripped.split(":", 1)[1].strip().strip('"')
+
+    flush()
+    return {"proxies": proxies, "proxy_groups": proxy_groups}
+
+
+def _parse_yaml_with_ruby(path: str) -> Optional[Dict[str, Any]]:
+    ruby = "/usr/bin/ruby"
+    if not Path(ruby).exists():
+        return None
+
+    script = r"""
+require "json"
+require "yaml"
+
+content = File.read(ARGV[0])
+begin
+  data = YAML.safe_load(content, aliases: true)
+rescue ArgumentError
+  data = YAML.load(content)
+end
+puts JSON.generate(data || {})
+"""
+    try:
+        result = subprocess.run([ruby, "-e", script, path],
+                                capture_output=True, text=True, timeout=20)
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _smart_value(v: str) -> Union[str, int, float, bool]:
+    v = v.strip()
+    if v.isdigit():
+        return int(v)
+    try:
+        return float(v)
+    except ValueError:
+        pass
+    if v.lower() in ("true", "false"):
+        return v.lower() == "true"
+    return v
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# sing-box config generator
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _build_outbound(node: Dict) -> Dict[str, Any]:
+    """Build the proxy outbound section for a node."""
+    node_type = node.get("type", "vmess")
+    server = node.get("server", "")
+    port = node.get("port", 443)
+    outbound: Dict[str, Any] = {"tag": "proxy"}
+
+    if node_type == "vmess":
+        outbound.update({"type": "vmess", "server": server, "server_port": port,
+                         "uuid": node.get("uuid", ""), "security": node.get("cipher", "auto"),
+                         "alter_id": node.get("alterId", 0)})
+        network = node.get("network", "")
+        if network == "ws":
+            transport: Dict[str, Any] = {"type": "ws"}
+            ws_opts = node.get("ws-opts") or {}
+            if not isinstance(ws_opts, dict):
+                ws_opts = {}
+            transport["path"] = (ws_opts.get("path") or node.get("ws-path") or "/")
+            if not transport.get("path"):
+                transport["path"] = "/"
+            ws_headers = {}
+            for src in [node.get("ws-headers", {}), ws_opts.get("headers", {})]:
+                if isinstance(src, dict):
+                    ws_headers.update({k: v for k, v in src.items() if isinstance(v, str)})
+            if not ws_headers and "Host" in node:
+                ws_headers["Host"] = node["Host"]
+            if ws_headers:
+                transport["headers"] = ws_headers
+            outbound["transport"] = transport
+
+    elif node_type == "hysteria2":
+        outbound.update({"type": "hysteria2", "server": server, "server_port": port,
+                         "password": node.get("password", ""),
+                         "tls": {"enabled": True, "server_name": node.get("sni", server),
+                                 "insecure": node.get("skip-cert-verify", False)}})
+        if node.get("down"):
+            outbound["down_mbps"] = node["down"]
+        if node.get("up"):
+            outbound["up_mbps"] = node["up"]
+
+    elif node_type == "anytls":
+        tls: Dict[str, Any] = {"enabled": True,
+                               "server_name": node.get("sni", server),
+                               "insecure": node.get("skip-cert-verify", False)}
+        if isinstance(node.get("alpn"), list):
+            tls["alpn"] = node["alpn"]
+        fingerprint = node.get("client-fingerprint")
+        if fingerprint:
+            tls["utls"] = {"enabled": True, "fingerprint": fingerprint}
+        outbound.update({"type": "anytls", "server": server, "server_port": port,
+                         "password": node.get("password", ""), "tls": tls})
+
+    else:
+        print(f"Warning: unknown type '{node_type}', falling back to vmess")
+        outbound.update({"type": "vmess", "server": server, "server_port": port,
+                         "uuid": node.get("uuid", "")})
+
+    return outbound
+
+
+def _base_route() -> Dict:
+    return {"rules": [], "auto_detect_interface": True}
+
+
+def mk_proxy_config(node: Dict) -> Dict:
+    """Config for proxy mode: HTTP/SOCKS inbound only."""
+    return {
+        "log": {"level": "warn"},
+        "inbounds": [{"type": "mixed", "tag": "mixed-in", "listen": PROXY_HOST,
+                       "listen_port": PROXY_PORT}],
+        "outbounds": [_build_outbound(node), {"type": "direct", "tag": "direct"}],
+        "route": {**_base_route(), "rules": [{"inbound": "mixed-in", "outbound": "proxy"}]},
+    }
+
+
+def mk_tun_config(node: Dict) -> Dict:
+    """Config for TUN mode (needs ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true).
+
+    DNS: system resolver for bootstrapping, 1.1.1.1 via proxy for remote.
+    TUN + HTTP/SOCKS run simultaneously — browser + CLI + Docker all work.
+    """
+    return {
+        "log": {"level": "warn"},
+        "dns": {
+            "servers": [
+                {"tag": "dns-remote", "address": "https://1.1.1.1/dns-query",
+                 "detour": "proxy"},
+                {"tag": "dns-local", "address": "local", "detour": "direct"},
+            ],
+            "rules": [
+                {"outbound": "any", "server": "dns-local"},
+            ],
+            "final": "dns-remote",
+            "strategy": "ipv4_only",
+            "reverse_mapping": True,
+        },
+        "inbounds": [
+            {"type": "tun", "tag": "tun-in", "address": [TUN_ADDR], "mtu": 9000,
+             "auto_route": True, "strict_route": True, "stack": "system"},
+            {"type": "mixed", "tag": "mixed-in", "listen": PROXY_HOST,
+             "listen_port": PROXY_PORT},
+        ],
+        "outbounds": [
+            _build_outbound(node),
+            {"type": "direct", "tag": "direct"},
+        ],
+        "route": {
+            **_base_route(),
+            "default_domain_resolver": "dns-local",
+            "rules": [
+                {"inbound": "tun-in", "outbound": "proxy"},
+                {"inbound": "mixed-in", "outbound": "proxy"},
+            ],
+        },
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Process management
+# ═══════════════════════════════════════════════════════════════════════════════
+
+PROXY_KINDS = {
+    "http": {
+        "get": "-getwebproxy",
+        "set": "-setwebproxy",
+        "state": "-setwebproxystate",
+    },
+    "https": {
+        "get": "-getsecurewebproxy",
+        "set": "-setsecurewebproxy",
+        "state": "-setsecurewebproxystate",
+    },
+    "socks": {
+        "get": "-getsocksfirewallproxy",
+        "set": "-setsocksfirewallproxy",
+        "state": "-setsocksfirewallproxystate",
+    },
+}
+
+
+def _run_networksetup(args: List[str], warn: bool = True) -> bool:
+    if sys.platform != "darwin":
+        return True
+    try:
+        result = subprocess.run(["networksetup", *args], capture_output=True,
+                                text=True, timeout=10)
+    except Exception as exc:
+        if warn:
+            print(f"Warning: networksetup failed: {exc}")
+        return False
+    if result.returncode != 0:
+        if warn:
+            msg = (result.stderr or result.stdout).strip()
+            print(f"Warning: networksetup {' '.join(args)} failed: {msg}")
+        return False
+    return True
+
+
+def _network_services() -> List[str]:
+    if sys.platform != "darwin":
+        return []
+    try:
+        result = subprocess.run(["networksetup", "-listallnetworkservices"],
+                                capture_output=True, text=True, timeout=10)
+    except Exception:
+        return []
+    if result.returncode != 0:
+        return []
+
+    services = []
+    for line in result.stdout.splitlines():
+        service = line.strip()
+        if not service or service.startswith("An asterisk"):
+            continue
+        if service.startswith("*"):
+            continue
+        services.append(service)
+    return services
+
+
+def _parse_proxy_output(text: str) -> Dict[str, Any]:
+    data: Dict[str, Any] = {"enabled": False, "server": "", "port": ""}
+    for line in text.splitlines():
+        key, sep, value = line.partition(":")
+        if not sep:
+            continue
+        key = key.strip()
+        value = value.strip()
+        if key == "Enabled":
+            data["enabled"] = value == "Yes"
+        elif key == "Server":
+            data["server"] = value
+        elif key == "Port":
+            data["port"] = value
+    return data
+
+
+def _get_proxy_setting(service: str, kind: str) -> Dict[str, Any]:
+    spec = PROXY_KINDS[kind]
+    try:
+        result = subprocess.run(["networksetup", spec["get"], service],
+                                capture_output=True, text=True, timeout=10)
+    except Exception:
+        return {"enabled": False, "server": "", "port": ""}
+    if result.returncode != 0:
+        return {"enabled": False, "server": "", "port": ""}
+    return _parse_proxy_output(result.stdout)
+
+
+def _system_proxy_snapshot() -> Dict[str, Any]:
+    if sys.platform != "darwin":
+        return {}
+    return {
+        service: {
+            kind: _get_proxy_setting(service, kind)
+            for kind in PROXY_KINDS
+        }
+        for service in _network_services()
+    }
+
+
+def _set_proxy_setting(service: str, kind: str, setting: Dict[str, Any]) -> bool:
+    spec = PROXY_KINDS[kind]
+    enabled = bool(setting.get("enabled"))
+    server = str(setting.get("server") or "")
+    port = str(setting.get("port") or "")
+    ok = True
+    if server and port and port != "0":
+        ok = _run_networksetup([spec["set"], service, server, port]) and ok
+    ok = _run_networksetup([spec["state"], service, "on" if enabled else "off"]) and ok
+    return ok
+
+
+def _enable_system_proxies() -> bool:
+    ok = True
+    for service in _network_services():
+        for kind, spec in PROXY_KINDS.items():
+            ok = _run_networksetup([spec["set"], service, PROXY_HOST, str(PROXY_PORT)]) and ok
+            ok = _run_networksetup([spec["state"], service, "on"]) and ok
+    return ok
+
+
+def _disable_own_system_proxies() -> bool:
+    owner = _port_owner(PROXY_PORT)
+    if owner and "sing-box" not in owner:
+        return True
+
+    ok = True
+    for service in _network_services():
+        for kind, spec in PROXY_KINDS.items():
+            current = _get_proxy_setting(service, kind)
+            if current.get("server") == PROXY_HOST and str(current.get("port")) == str(PROXY_PORT):
+                ok = _run_networksetup([spec["state"], service, "off"]) and ok
+    return ok
+
+
+def _restore_system_proxies(snapshot: Optional[Dict[str, Any]]) -> bool:
+    if not snapshot:
+        return _disable_own_system_proxies()
+
+    ok = True
+    current_services = set(_network_services())
+    for service, settings in snapshot.items():
+        if service not in current_services:
+            continue
+        for kind, setting in settings.items():
+            if kind in PROXY_KINDS and isinstance(setting, dict):
+                ok = _set_proxy_setting(service, kind, setting) and ok
+    return ok
+
+
+def _system_proxy_summary() -> str:
+    snapshot = _system_proxy_snapshot()
+    enabled = []
+    for service, settings in snapshot.items():
+        for kind, setting in settings.items():
+            if setting.get("enabled"):
+                server = setting.get("server") or "?"
+                port = setting.get("port") or "?"
+                enabled.append(f"{service}/{kind}={server}:{port}")
+    if not enabled:
+        return "OFF"
+    own = all(item.endswith(f"={PROXY_HOST}:{PROXY_PORT}") for item in enabled)
+    return f"ON ({PROXY_HOST}:{PROXY_PORT})" if own else "ON (custom proxy settings)"
+
+
+def _port_is_available(host: str, port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind((host, port))
+        except OSError:
+            return False
+    return True
+
+
+def _port_owner(port: int) -> str:
+    try:
+        result = subprocess.run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"],
+                                capture_output=True, text=True, timeout=10)
+    except Exception:
+        return ""
+    for line in result.stdout.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 2:
+            return f"{parts[0]} (PID {parts[1]})"
+
+    try:
+        result = subprocess.run(["netstat", "-anv", "-p", "tcp"],
+                                capture_output=True, text=True, timeout=10)
+    except Exception:
+        return ""
+    marker = f".{port}"
+    for line in result.stdout.splitlines():
+        if marker not in line or "LISTEN" not in line:
+            continue
+        tail = line.split("LISTEN", 1)[1]
+        for token in tail.split():
+            if ":" not in token:
+                continue
+            name, pid = token.rsplit(":", 1)
+            if pid.isdigit() and name != "process":
+                return f"{name} (PID {pid})"
+    return ""
+
+
+def _print_log_tail(path: Path, lines: int = 20):
+    if not path.exists():
+        return
+    content = path.read_text(errors="replace").splitlines()
+    if not content:
+        return
+    print(f"  Last log lines:")
+    for line in content[-lines:]:
+        print(f"    {line}")
+
+
+def _find_singbox() -> Optional[int]:
+    try:
+        result = subprocess.run(["ps", "-axo", "pid=,comm=,args="],
+                                capture_output=True, text=True, timeout=10)
+        if result.returncode != 0:
+            return None
+        config_dir = str(CONFIG_DIR)
+        for line in result.stdout.splitlines():
+            parts = line.strip().split(None, 2)
+            if len(parts) < 3:
+                continue
+            pid_s, _comm, args = parts
+            argv0 = Path(args.split()[0]).name if args.split() else ""
+            if argv0 == "sing-box" and config_dir in args:
+                return int(pid_s)
+    except Exception:
+        pass
+    return None
+
+
+def _save_state(mode: str, node_name: str, system_proxy_before: Optional[Dict[str, Any]] = None):
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    state = {"mode": mode, "node": node_name, "pid": _find_singbox(), "port": PROXY_PORT}
+    if system_proxy_before is not None:
+        state["system_proxy_before"] = system_proxy_before
+    STATE_FILE.write_text(json.dumps(state, indent=2))
+
+
+def _load_state() -> Optional[Dict]:
+    if STATE_FILE.exists():
+        try:
+            return json.loads(STATE_FILE.read_text())
+        except Exception:
+            pass
+    return None
+
+
+def _stop(mode_hint: Optional[str] = None):
+    """Stop sing-box. Uses sudo if running as root (TUN mode)."""
+    state = _load_state()
+    pid = _find_singbox()
+    if pid:
+        # Check if sing-box is running as root
+        try:
+            result = subprocess.run(["ps", "-o", "user=", "-p", str(pid)],
+                                    capture_output=True, text=True)
+            is_root = result.stdout.strip() == "root"
+        except Exception:
+            is_root = False
+
+        if is_root and os.geteuid() != 0:
+            sudo_check = subprocess.run(["sudo", "-n", "true"],
+                                        capture_output=True, text=True)
+            if sudo_check.returncode != 0:
+                print(f"Root-owned sing-box is running (PID {pid}).")
+                print("Run this to stop TUN mode:")
+                print("  sudo fleet stop")
+                return
+            kill_cmd = ["sudo", "-n", "kill"]
+        else:
+            kill_cmd = ["kill"]
+        try:
+            subprocess.run(kill_cmd + [str(pid)], timeout=5)
+            time.sleep(1)
+            if _find_singbox():
+                subprocess.run(kill_cmd + ["-9", str(pid)], timeout=5)
+        except Exception:
+            pass
+
+    system_proxy_before = None
+    if isinstance(state, dict):
+        system_proxy_before = state.get("system_proxy_before")
+    _restore_system_proxies(system_proxy_before)
+
+    if STATE_FILE.exists():
+        STATE_FILE.unlink()
+
+
+def _start(node: Dict, mode: str, system_proxy_before: Optional[Dict[str, Any]] = None) -> bool:
+    """Start sing-box with the given node and mode. Returns True on success."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    if not Path(SING_BOX_BIN).exists():
+        print(f"sing-box not found: {SING_BOX_BIN}")
+        print("Install it with: brew install sing-box")
+        return False
+    owner = _port_owner(PROXY_PORT)
+    if owner:
+        print(f"Port in use: {PROXY_HOST}:{PROXY_PORT}")
+        print(f"Owner: {owner}")
+        print("Stop the owner first, or choose another port with:")
+        print("  FLEET_PORT=7891 fleet start <node>")
+        return False
+
+    config = mk_tun_config(node) if mode == "tun" else mk_proxy_config(node)
+    SING_BOX_CONFIG.write_text(json.dumps(config, indent=2))
+
+    # Validate (TUN may need legacy DNS compat env)
+    check_env = os.environ.copy()
+    if mode == "tun":
+        check_env["ENABLE_DEPRECATED_LEGACY_DNS_SERVERS"] = "true"
+        check_env["ENABLE_DEPRECATED_OUTBOUND_DNS_RULE_ITEM"] = "true"
+    result = subprocess.run([SING_BOX_BIN, "check", "-c", str(SING_BOX_CONFIG)],
+                            capture_output=True, text=True, env=check_env)
+    if result.returncode != 0:
+        print(f"Config error:\n{result.stderr}")
+        return False
+
+    # Build command
+    cmd = [SING_BOX_BIN, "run", "-c", str(SING_BOX_CONFIG), "-D", str(CONFIG_DIR)]
+
+    if mode == "tun":
+        tun_env_vars = ("ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true "
+                        "ENABLE_DEPRECATED_OUTBOUND_DNS_RULE_ITEM=true")
+        tun_cmd = " ".join(f"'{c}'" if ' ' in str(c) else str(c) for c in cmd)
+        full_cmd = f"sudo env {tun_env_vars} {tun_cmd}"
+        start_script = CONFIG_DIR / "start-tun.sh"
+        start_script.write_text(f"#!/bin/bash\nexec {full_cmd}\n")
+        start_script.chmod(0o755)
+
+        print("Requesting sudo to start TUN mode...")
+        try:
+            sudo_result = subprocess.run(["sudo", "-v"], timeout=60)
+        except Exception:
+            sudo_result = subprocess.CompletedProcess(["sudo", "-v"], 1)
+        if sudo_result.returncode != 0:
+            print("Could not obtain sudo credentials.")
+            print("Run this in your terminal instead:")
+            print("")
+            print(f"  {start_script}")
+            print("")
+            return False
+
+        run_cmd = ["sudo", "-n", "env",
+                   "ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true",
+                   "ENABLE_DEPRECATED_OUTBOUND_DNS_RULE_ITEM=true",
+                   *cmd]
+        with open(SING_BOX_LOG, "w") as log:
+            subprocess.Popen(run_cmd, stdout=log, stderr=log, start_new_session=True)
+    else:
+        with open(SING_BOX_LOG, "w") as log:
+            subprocess.Popen(cmd, stdout=log, stderr=log, start_new_session=True)
+
+    time.sleep(3 if mode == "tun" else 2)
+    pid = _find_singbox()
+    if pid:
+        if mode == "proxy":
+            _enable_system_proxies()
+        _save_state(mode, node["name"], system_proxy_before)
+        return True
+    return False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Commands
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def cmd_list(nodes: List[Dict]):
+    state = _load_state()
+    current = state["node"] if state else None
+    mode = state.get("mode", "") if state else ""
+
+    header = f"{'':4s} {'NODE':38s} {'TYPE':10s} {'SERVER'}"
+    print(header)
+    print("-" * 80)
+    for i, node in enumerate(nodes):
+        marker = "→" if node["name"] == current else " "
+        print(f"{marker} {i:2d} {node['name']:38s} {node.get('type','vmess'):10s} {node.get('server','?'):30s}")
+    print("-" * 80)
+    print(f"Total: {len(nodes)} nodes")
+    if state:
+        print(f"Mode: {mode}  |  Node: {current}  |  PID: {state.get('pid','?')}")
+    else:
+        print("Not running")
+    return 0
+
+
+def cmd_status():
+    state = _load_state()
+    pid = _find_singbox()
+    system_proxy = _system_proxy_summary()
+
+    if pid and state:
+        print(f"Mode:    {state.get('mode', '?')}")
+        print(f"Status:  RUNNING (PID {pid})")
+        print(f"Node:    {state['node']}")
+        print(f"Port:    {PROXY_HOST}:{PROXY_PORT} (HTTP + SOCKS5)")
+        print(f"System:  macOS proxy {system_proxy}")
+        if state.get("mode") == "tun":
+            print(f"TUN:     {TUN_ADDR}")
+        _test_proxy()
+    elif pid:
+        print(f"Status: RUNNING (PID {pid}) — state missing")
+        print(f"System: macOS proxy {system_proxy}")
+    else:
+        print("Status: STOPPED")
+        print(f"System: macOS proxy {system_proxy}")
+        if state:
+            print(f"Last:   {state['node']} ({state.get('mode','?')})")
+    return 0
+
+
+def cmd_start(nodes: List[Dict], target: str, mode: str = "proxy"):
+    _stop()
+    node = _find_node(nodes, target)
+    if not node:
+        return 1
+    system_proxy_before = _system_proxy_snapshot() if mode == "proxy" else None
+    if mode == "tun":
+        print(f"Starting TUN mode with: {node['name']}")
+        print("(sudo may prompt for password)")
+    else:
+        print(f"Starting proxy mode with: {node['name']}")
+    if _start(node, mode, system_proxy_before):
+        if mode == "tun":
+            print(f"  HTTP/SOCKS: {PROXY_HOST}:{PROXY_PORT}")
+            print(f"  TUN: {TUN_ADDR} (system-wide)")
+            print(f"  System: macOS proxy unchanged")
+            print(f"  Docker containers: auto-proxied ✓")
+        else:
+            pid = _find_singbox()
+            print(f"✓ {mode} mode started (PID {pid}) — {node['name']}")
+            print(f"  HTTP/SOCKS: {PROXY_HOST}:{PROXY_PORT}")
+            print(f"  System: macOS proxy enabled")
+            _test_proxy()
+    else:
+        print(f"✗ Failed to start {mode} mode")
+        print(f"  Log: cat {SING_BOX_LOG}")
+        _print_log_tail(SING_BOX_LOG)
+        return 1
+    return 0
+
+
+def cmd_stop():
+    state = _load_state()
+    pid = _find_singbox()
+    _stop()
+    print("✓ Stopped and restored system proxy" if state or pid else "System proxy cleaned")
+    return 0
+
+
+def cmd_switch(nodes: List[Dict], target: str, mode: Optional[str] = None):
+    """Switch node in the given mode, or auto-detect active mode."""
+    if not mode:
+        state = _load_state()
+        mode = state.get("mode", "proxy") if state else "proxy"
+
+    node = _find_node(nodes, target)
+    if not node:
+        return 1
+
+    print(f"Switching [{mode}] → {node['name']}")
+    _stop()
+    system_proxy_before = _system_proxy_snapshot() if mode == "proxy" else None
+    if _start(node, mode, system_proxy_before):
+        pid = _find_singbox()
+        print(f"✓ Switched (PID {pid})")
+        _test_proxy()
+    else:
+        print("✗ Failed")
+        return 1
+    return 0
+
+
+def cmd_refresh():
+    if not CLASH_CONFIG.exists():
+        print(f"Clash config not found: {CLASH_CONFIG}")
+        for p in [Path.home() / ".config/clash/config.yaml",
+                  Path.home() / ".config/mihomo/config.yaml"]:
+            if p.exists():
+                print(f"Found at: {p}")
+        return 1
+
+    config = parse_clash_config(str(CLASH_CONFIG))
+    real = [p for p in config["proxies"]
+            if p.get("name") not in ("剩余流量：144.3 GB", "套餐到期：长期有效")]
+
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    NODES_FILE.write_text(json.dumps({"nodes": real, "groups": config["proxy_groups"]},
+                                     indent=2, ensure_ascii=False))
+    print(f"✓ Parsed {len(real)} nodes")
+    for i, p in enumerate(real):
+        print(f"  {i:2d} {p['name']}")
+    return 0
+
+
+def cmd_ping(nodes: List[Dict], target: Optional[str] = None):
+    """Test TCP latency to node servers."""
+    import concurrent.futures
+    import socket as sock_mod
+
+    targets = nodes
+    if target:
+        n = _find_node(nodes, target)
+        if not n:
+            return 1
+        targets = [n]
+
+    def _tcp_latency(node: Dict) -> tuple:
+        server = node.get("server", "")
+        port = node.get("port", 443)
+        try:
+            t0 = time.monotonic()
+            with sock_mod.create_connection((server, port), timeout=5):
+                elapsed = (time.monotonic() - t0) * 1000
+            return (node["name"], elapsed)
+        except Exception:
+            return (node["name"], None)
+
+    print(f"Testing TCP latency to {len(targets)} node(s)...")
+    print(f"{'':4s} {'NODE':38s} {'LATENCY':>10s}")
+    print("-" * 56)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+        futures = {executor.submit(_tcp_latency, n): n for n in targets}
+        results = []
+        for future in concurrent.futures.as_completed(futures):
+            name, ms = future.result()
+            results.append((name, ms))
+
+    # Preserve original order
+    order = {n["name"]: i for i, n in enumerate(nodes) if n["name"] in {r[0] for r in results}}
+    results.sort(key=lambda r: order.get(r[0], 999))
+
+    state = _load_state()
+    current = state["node"] if state else None
+
+    for name, ms in results:
+        marker = "→" if name == current else " "
+        if ms is not None:
+            bar = _latency_bar(ms)
+            print(f"{marker}  {name:38s} {ms:7.0f}ms {bar}")
+        else:
+            print(f"{marker}  {name:38s} {'TIMEOUT':>10s}")
+    print("-" * 56)
+    return 0
+
+
+def cmd_export(nodes: List[Dict], target: str, mode: str = "proxy"):
+    node = _find_node(nodes, target)
+    if not node:
+        return 1
+    config = mk_tun_config(node) if mode == "tun" else mk_proxy_config(node)
+    print(json.dumps(config, indent=2, ensure_ascii=False))
+    return 0
+
+
+def _latency_bar(ms: float) -> str:
+    """Visual latency indicator."""
+    if ms < 100:
+        return "🟢"
+    elif ms < 300:
+        return "🟡"
+    elif ms < 800:
+        return "🟠"
+    else:
+        return "🔴"
+
+
+def _test_proxy():
+    """Quick connectivity test through the proxy."""
+    try:
+        t0 = time.monotonic()
+        result = subprocess.run(
+            ["curl", "-x", f"http://{PROXY_HOST}:{PROXY_PORT}",
+             "-s", "-o", "/dev/null", "-w", "%{http_code}",
+             "--connect-timeout", "8", "https://api.github.com"],
+            capture_output=True, text=True, timeout=12
+        )
+        elapsed = (time.monotonic() - t0) * 1000
+        code = result.stdout.strip()
+        if code and code != "000":
+            print(f"  Test:    api.github.com → HTTP {code} ({elapsed:.0f}ms) ✓")
+        else:
+            print(f"  Test:    api.github.com → TIMEOUT ✗")
+    except Exception:
+        print(f"  Test:    failed")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Helpers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _find_node(nodes: List[Dict], target: str) -> Optional[Dict]:
+    if not target:
+        print("Node required. Use 'fleet list' to choose a name or index.")
+        return None
+    try:
+        idx = int(target)
+        if 0 <= idx < len(nodes):
+            return nodes[idx]
+    except ValueError:
+        pass
+    for n in nodes:
+        if n["name"] == target:
+            return n
+    matches = [n for n in nodes if target.lower() in n["name"].lower()]
+    if len(matches) == 1:
+        return matches[0]
+    elif len(matches) > 1:
+        print(f"Multiple matches for '{target}':")
+        for m in matches:
+            print(f"  {m['name']}")
+        return None
+    print(f"Node not found: {target}")
+    return None
+
+
+def _load_nodes() -> List[Dict]:
+    if not NODES_FILE.exists():
+        print("No nodes cached. Run 'fleet refresh' first.")
+        return []
+    return json.loads(NODES_FILE.read_text()).get("nodes", [])
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Main
+# ═══════════════════════════════════════════════════════════════════════════════
+
+HELP = f"""fleet — CLI proxy node manager backed by sing-box.
+
+Two modes:
+  proxy   HTTP/SOCKS on {PROXY_HOST}:{PROXY_PORT}   (also sets macOS system proxy)
+  tun     System-wide TUN + fake-IP DNS  (needs sudo, Docker auto-proxied)
+
+Commands:
+  refresh                   Parse Clash config, cache nodes
+  list                      List all nodes
+  ping [name|index]         Test TCP latency to all/specific nodes
+
+  proxy start <name|index>  Start proxy mode
+  proxy stop                Stop proxy mode
+  proxy switch <name|index> Switch node (proxy mode)
+  proxy status              Shortcut: status
+
+  tun start <name|index>    Start TUN mode (needs sudo)
+  tun stop                  Stop TUN mode
+  tun switch <name|index>   Switch node (TUN mode)
+  tun status                Shortcut: status
+
+  start <name|index>        Start (default: proxy mode)
+  stop                      Stop whatever is running
+  status                    Show current state
+  switch <name|index>       Switch in active mode
+
+  export <name|index>       Export sing-box config (proxy mode)
+  export tun <name|index>   Export sing-box config (TUN mode)
+
+Config dir: ~/.config/fleet/
+Backend:    sing-box (brew install sing-box)"""
+
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] in ("help", "-h", "--help"):
+        print(HELP)
+        return 0
+
+    cmd = args[0]
+
+    # ── Subcommand: proxy ──
+    if cmd == "proxy":
+        sub = args[1] if len(args) > 1 else ""
+        target = args[2] if len(args) > 2 else ""
+        if sub == "start":
+            return cmd_start(_load_nodes(), target, "proxy")
+        elif sub == "stop":
+            return cmd_stop()
+        elif sub in ("switch", "sw"):
+            return cmd_switch(_load_nodes(), target, "proxy")
+        elif sub in ("status", "st"):
+            return cmd_status()
+        else:
+            print(f"Unknown proxy subcommand: {sub}")
+            print("Try: fleet proxy start|stop|switch|status")
+            return 1
+    # ── Subcommand: tun ──
+    elif cmd == "tun":
+        sub = args[1] if len(args) > 1 else ""
+        target = args[2] if len(args) > 2 else ""
+        if sub == "start":
+            return cmd_start(_load_nodes(), target, "tun")
+        elif sub == "stop":
+            return cmd_stop()
+        elif sub in ("switch", "sw"):
+            return cmd_switch(_load_nodes(), target, "tun")
+        elif sub in ("status", "st"):
+            return cmd_status()
+        else:
+            print(f"Unknown tun subcommand: {sub}")
+            print("Try: fleet tun start|stop|switch|status")
+            return 1
+    # ── Top-level commands ──
+    elif cmd == "refresh":
+        return cmd_refresh()
+    elif cmd in ("list", "ls"):
+        return cmd_list(_load_nodes())
+    elif cmd == "start":
+        return cmd_start(_load_nodes(), args[1] if len(args) > 1 else "", "proxy")
+    elif cmd == "stop":
+        return cmd_stop()
+    elif cmd in ("status", "st"):
+        return cmd_status()
+    elif cmd in ("switch", "sw"):
+        return cmd_switch(_load_nodes(), args[1] if len(args) > 1 else "")
+    elif cmd in ("ping", "bench"):
+        target = args[1] if len(args) > 1 else None
+        return cmd_ping(_load_nodes(), target)
+    elif cmd == "export":
+        sub = args[1] if len(args) > 1 else ""
+        if sub == "tun":
+            return cmd_export(_load_nodes(), args[2] if len(args) > 2 else "", "tun")
+        else:
+            return cmd_export(_load_nodes(), sub, "proxy")
+    else:
+        print(f"Unknown command: {cmd}")
+        print("Try: fleet help")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main() or 0)
