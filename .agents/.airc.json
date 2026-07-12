@@ -1,0 +1,74 @@
+{
+  "project": "fleet",
+  "org": "fitlab-ai",
+  "language": "zh-CN",
+  "platform": {
+    "type": "github"
+  },
+  "templateVersion": "v0.8.3",
+  "sandbox": {
+    "engine": "colima",
+    "runtimes": [
+      "node22"
+    ],
+    "tools": [
+      "agent-infra",
+      "claude-code",
+      "codex",
+      "gemini-cli",
+      "opencode"
+    ],
+    "refreshIntervalDays": 7,
+    "dockerfile": null,
+    "vm": {
+      "cpu": null,
+      "memory": null,
+      "disk": null
+    }
+  },
+  "task": {
+    "shortIdLength": 2
+  },
+  "labels": {
+    "in": {}
+  },
+  "files": {
+    "managed": [
+      ".agents/QUICKSTART.md",
+      ".agents/README.md",
+      ".agents/hooks/",
+      ".agents/rules/",
+      ".agents/scripts/",
+      ".agents/skills/",
+      ".agents/templates/",
+      ".agents/workflows/",
+      ".agents/workspace/README.md",
+      ".claude/commands/",
+      ".codex/hooks.json",
+      ".git-hooks/check-version-format.sh",
+      ".github/scripts/",
+      ".opencode/commands/"
+    ],
+    "merged": [
+      "**/post-release.*",
+      "**/release.*",
+      "**/test-integration.*",
+      "**/test.*",
+      "**/upgrade-dependency.*",
+      ".agents/skills/post-release/SKILL.*",
+      ".agents/skills/release/SKILL.*",
+      ".agents/skills/test-integration/SKILL.*",
+      ".agents/skills/test/SKILL.*",
+      ".agents/skills/upgrade-dependency/SKILL.*",
+      ".claude/settings.json",
+      ".git-hooks/pre-commit",
+      ".gitignore"
+    ],
+    "ejected": []
+  },
+  "tuis": [
+    "claude-code",
+    "codex",
+    "opencode"
+  ]
+}

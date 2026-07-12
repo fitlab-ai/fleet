@@ -1,0 +1,60 @@
+# 代码审查工作流
+# 审查拉取请求或代码变更时使用此工作流。
+
+name: code-review
+description: 对拉取请求或分支进行全面代码审查的工作流。
+
+steps:
+  - name: analysis
+    description: 加载上下文并理解变更范围。
+    recommended_agents:
+      - claude
+      - gemini
+    tasks:
+      - 阅读 PR 描述和关联的 Issue
+      - 审查差异以理解变更内容
+      - 识别变更的意图和范围
+      - 加载相关的项目规范和标准
+    inputs:
+      - 待审查的拉取请求或分支
+      - 项目规范
+    outputs:
+      - 对变更范围的理解
+      - 待审查文件列表
+
+  - name: review
+    description: 执行全面的代码审查。
+    recommended_agents:
+      - claude
+    tasks:
+      - 检查代码正确性和逻辑
+      - 验证是否遵循项目编码标准
+      - 检查安全漏洞
+      - 评估性能影响
+      - 验证测试覆盖率和测试质量
+      - 检查文档更新
+      - 寻找边界情况和错误处理
+      - 审查提交信息
+    inputs:
+      - 代码变更（差异）
+      - 项目规范
+      - 现有测试套件
+    outputs:
+      - 包含分类发现的审查报告
+      - 批准或变更请求
+
+  - name: report
+    description: 记录和传达审查发现。
+    recommended_agents:
+      - claude
+    tasks:
+      - 从模板创建审查报告
+      - 按严重程度分类发现（严重、重要、次要、建议）
+      - 提供可操作的反馈，包含具体文件和行号引用
+      - 总结整体评估
+    inputs:
+      - 上一步的审查发现
+      - 审查报告模板
+    outputs:
+      - 完成的审查报告
+      - PR 评论（如适用）

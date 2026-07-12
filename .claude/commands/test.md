@@ -1,0 +1,7 @@
+---
+description: "执行项目完整测试流程"
+---
+
+读取并执行 `.agents/skills/test/SKILL.md` 中的 test 技能。
+
+严格按照技能中定义的所有步骤执行。

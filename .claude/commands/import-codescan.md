@@ -1,0 +1,9 @@
+---
+description: "导入 Code Scanning 告警并创建修复任务"
+usage: "/import-codescan <alert-number>"
+disable-model-invocation: true
+---
+
+读取并执行 `.agents/skills/import-codescan/SKILL.md` 中的 import-codescan 技能。
+
+严格按照技能中定义的所有步骤执行。

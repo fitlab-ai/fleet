@@ -1,0 +1,105 @@
+# 下一步输出规则
+
+本文件定义 skill「告知用户 / 下一步」输出的四类**相互独立**的规则（第 3 类仅 review-* 适用）；渲染最终输出前先读取本文件并落实其中适用的规则：
+
+1. **下一步输出结构**：「下一步」命令与「任务信息」段如何呈现任务 ID 形态（占位符 / 取短号 / 回退）。
+2. **Agent 输出收尾行（Completed at）**：面向用户输出的**绝对最后一行**，**独立于「下一步」块**，正常 / 错误 / 早退路径都适用。
+3. **人工裁决待办前置块**：仅 `review-analysis` / `review-plan` / `review-code`，且本阶段存在待裁决项（`{h} > 0`）时适用——在「下一步」命令前展开待裁决项并提示先完成裁决。
+4. **Workflow Warnings 输出块**：当前 task.md 存在 `status=open` 的 `## 工作流告警` 行时适用——在所有常规信息和「下一步」命令之后、`Completed at` 之前输出告警摘要。
+
+## 占位符语义
+
+| 占位符 | 含义 | 渲染形态 |
+|--------|------|----------|
+| `{task-ref}` | 当前任务**短号** | 带 `#` 前缀，如 `#15`；取不到时回退完整 `TASK-id` |
+| `{task-id}` | 当前任务**完整 ID** | `TASK-YYYYMMDD-HHMMSS` |
+
+## 适用范围
+
+- **下一步 TUI 命令**（`/analyze-task`、`/fleet:review-code`、`$create-pr` 等，含 Markdown 表格单元格内的命令）→ 一律用 `{task-ref}`（短号）。
+- **「任务信息」/「任务状态」结构化字段行** → 完整 ID 与短号同显：`- 任务 ID：{task-id}（短号 {task-ref}）`。
+- **报告标题**（`任务 {task-id} ... 完成`）与**产出文件路径**（`.agents/workspace/active/{task-id}/...`）→ 保持完整 `{task-id}`（物理路径与归档键，不可改）。
+
+## 取短号（`{task-ref}`）
+
+短号唯一真源是注册表 `.agents/workspace/active/.short-ids.json`（经 `task-short-id.js`）。**禁止**读取 task.md frontmatter 的 `short_id` 字段（该字段不可信）。
+
+在已解析出完整 `$task_id` 后，用以下片段反查短号；命中返回 `#NN`，未命中自动回退完整 `TASK-id`：
+
+```bash
+task_ref=$(node -e '
+const cp=require("child_process");
+const out=cp.execSync("node .agents/scripts/task-short-id.js list",{encoding:"utf8"});
+const ids=(JSON.parse(out).ids)||{};
+const full=process.argv[1];
+const hit=Object.entries(ids).find(([,v])=>v===full);
+process.stdout.write(hit?("#"+hit[0]):full);
+' "$task_id")
+# 示例：$task_id=TASK-20260613-225809 -> task_ref=#15
+```
+
+## 回退条件
+
+`{task-ref}` 在以下情况回退为完整 `TASK-id`（即注册表查不到对应短号）：
+
+- **未分配**：任务尚未经 `create-task` / `import-*` / `restore-task` 分配短号的极早期路径。
+- **已释放**：任务经 `complete-task` / `cancel-task` / `block-task` / `close-codescan` / `close-dependabot` 归档后，短号立即从注册表移除。这些归档类 skill 的终态/摘要行因此自然回退完整 `TASK-id`，无需特判。
+
+`restore-task` 恢复任务时会重新分配短号（可能与历史不同），片段会取到新短号。
+
+## `#` 前缀与 shell 引用
+
+短号统一渲染为带 `#` 前缀的 `#NN`，与 task.md frontmatter 的 `short_id` 渲染一致。`#` 在 bash 中是注释起始符，示例命令若直接粘贴需视 TUI 而定（裸数字 `NN` 与 `#NN` 都被 `task-short-id.js resolve` 接受）。
+
+## Agent 输出收尾行（Completed at）
+
+本节是与「下一步输出结构」**并列的独立规则**，不隶属于「下一步」块。任何向用户渲染输出的 skill 都必须在面向用户输出的**绝对最后一行**追加完成时间收尾行——包括**声明「不渲染下一步命令」的 complete-task**，以及前置条件未满足而提前 return 的**错误 / 早退路径**。便于用户在 tmux 多窗口扫视时一眼判断各 Agent 的完成先后：
+
+```text
+Completed at: YYYY-MM-DD HH:mm:ss
+```
+
+- 取值命令（本地时区、不带偏移）：`date "+%Y-%m-%d %H:%M:%S"`
+- 位置：必须是整段面向用户输出的最后一行，排在所有「下一步」命令之后。若某场景在命令之后还有条件性提醒行（如 manual-validation 提醒），收尾行排在该提醒行之后。
+- 该行只用于终端扫视，不写入任何产物文件或 Issue/PR 评论；完成时刻的单一事实源仍是 task.md 的 Activity Log。
+
+## Workflow Warnings 输出块
+
+若当前任务的 `## 工作流告警` / `## Workflow Warnings` 表中存在 `status=open` 行，skill 最终输出必须在所有常规信息和「下一步」命令之后、`Completed at` 之前追加摘要块；无 open 告警时不输出本块。
+
+格式：
+
+```text
+[ACTION REQUIRED] Workflow warnings are open:
+  - WW-N {code} ({target}): {action}
+```
+
+`severity=ACTION_REQUIRED` 的行使用 `[ACTION REQUIRED]`；只有 `IMPORTANT` 行时使用 `[IMPORTANT]`。`{code}`、`{target}`、`{action}` 直接来自告警表对应列。
+
+## 人工裁决待办前置块（review-* 专用，{h} > 0 时）
+
+本节是与上面两类规则**并列的第三类独立规则**，仅 `review-analysis` / `review-plan` / `review-code` 的「向用户汇报结论」步骤使用。
+
+`{h}` 含义与各 review 技能 `reference/output-templates.md` 计数行一致：task.md `## 审查分歧账本` 中**本阶段**（`stage ∈ {analysis|plan|code}`）`status = needs-human-decision` 的行数——**只含待裁决项，不含已 `human-decided`**。
+
+- **`{h} = 0`**：不输出本块，「下一步」按 output-templates 选定场景原样渲染。
+- **`{h} > 0`**：在选定场景的「下一步 - <阶段>」命令**之前**插入下面的块；下一阶段命令仍照常列在块之后。
+
+```text
+⚠️ 待人工裁决（{h} 项）—— 请先逐项裁决，再继续下一阶段：
+  - {ledger-id}（{stage}/{severity}）：{摘要}
+    位置：task.md `## 审查分歧账本` 对应行 · 证据：{evidence}
+  …（task.md `## 审查分歧账本` 中本阶段每个 status=needs-human-decision 行一条）
+
+查看详情：
+  - 全部待裁决项：ai task decisions {task-ref}
+  - 单项完整背景/选项/影响/建议：ai task decisions {task-ref} <序号|HD-id>
+
+完成裁决：
+  1. 在 task.md `## 人工裁决` 段，逐项记录你对上述裁决项的裁定与理由。
+  2. 把 `## 审查分歧账本` 中对应行的 status 由 `needs-human-decision` 翻为 `human-decided`。
+
+说明：在上述行全部翻为 `human-decided` 之前，直接执行下一阶段命令会被 complete-task 等 gate 拦截（`needs-human-decision` 为非终态）。下一阶段命令仍列在下方，供裁决完成后使用。
+```
+
+字段取值：`{ledger-id}` / `{stage}` / `{severity}` / `{evidence}` 直接取自 `## 审查分歧账本` 对应行的同名列；`{摘要}` 取自 `{evidence}` 指向的产物锚点条目（如 `plan.md#HD-1` 的决策标题），无锚点标题时用该 finding 的一句话概述。

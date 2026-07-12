@@ -1,0 +1,30 @@
+{
+  "skill": "block-task",
+  "checks": {
+    "task-meta": {
+      "required_fields": [
+        "id",
+        "type",
+        "workflow",
+        "status",
+        "created_at",
+        "updated_at",
+        "agent_infra_version",
+        "current_step",
+        "assigned_to",
+        "blocked_at"
+      ],
+      "expected_status": "blocked",
+      "require_blocked_at": true
+    },
+    "activity-log": {
+      "expected_action_pattern": "(Block Task|Blocked)",
+      "freshness_minutes": 30
+    },
+    "platform-sync": {
+      "when": "issue_number_exists",
+      "expected_status_label": "status: blocked",
+      "expected_status_label_key": "blocked"
+    }
+  }
+}

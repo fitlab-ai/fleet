@@ -1,0 +1,30 @@
+{
+  "skill": "import-issue",
+  "checks": {
+    "task-meta": {
+      "required_fields": [
+        "id",
+        "type",
+        "branch",
+        "workflow",
+        "status",
+        "created_at",
+        "updated_at",
+        "agent_infra_version",
+        "current_step",
+        "assigned_to"
+      ],
+      "expected_step": "requirement-analysis",
+      "require_issue_number": true
+    },
+    "activity-log": {
+      "expected_action_pattern": "Import Issue",
+      "freshness_minutes": 30
+    },
+    "platform-sync": {
+      "when": "issue_number_exists",
+      "issue_must_exist": true,
+      "verify_task_comment_content": true
+    }
+  }
+}

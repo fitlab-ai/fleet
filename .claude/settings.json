@@ -1,0 +1,45 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(tree:*)",
+      "Bash(date:*)",
+      "Bash(git:*)",
+      "Bash(gh:*)",
+      "Bash(ls:*)",
+      "Bash(pwd:*)",
+      "Bash(echo:*)",
+      "Bash(mkdir:*)",
+      "WebSearch",
+      "WebFetch"
+    ],
+    "deny": [
+      "Bash(sudo rm:*)",
+      "Bash(rm -rf /:*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"$(git rev-parse --show-toplevel)/.agents/hooks/check-version-format.sh\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"$(git rev-parse --show-toplevel)/.agents/hooks/auto-resume.sh\""
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "skill": "commit",
+  "checks": {
+    "task-meta": {
+      "required_fields": [
+        "id",
+        "type",
+        "workflow",
+        "status",
+        "created_at",
+        "updated_at",
+        "agent_infra_version",
+        "current_step",
+        "assigned_to"
+      ]
+    },
+    "activity-log": {
+      "expected_action_pattern": "Commit",
+      "freshness_minutes": 30
+    },
+    "platform-sync": {
+      "when": "pr_number_exists",
+      "expected_pr_comment_marker": "<!-- sync-pr:{task-id}:summary -->",
+      "verify_in_labels_computed": true,
+      "verify_pr_comment_last_commit_matches_head": true,
+      "expected_pr_comment_marker_key": "prSummary"
+    }
+  }
+}

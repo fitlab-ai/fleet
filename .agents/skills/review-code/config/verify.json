@@ -1,0 +1,56 @@
+{
+  "skill": "review-code",
+  "checks": {
+    "task-meta": {
+      "required_fields": [
+        "id",
+        "type",
+        "workflow",
+        "status",
+        "created_at",
+        "updated_at",
+        "agent_infra_version",
+        "current_step",
+        "assigned_to"
+      ],
+      "expected_step": "code-review"
+    },
+    "artifact": {
+      "file_pattern": "review-code.md|review-code-r{N}.md",
+      "required_sections": [
+        "审查摘要",
+        "问题清单",
+        "人工校验项",
+        "结论与建议",
+        "状态核对",
+        "证据原文",
+        "自我质疑",
+        "审查分歧账本回写"
+      ],
+      "required_patterns": [
+        "^### 审查决定$",
+        "^\\$ ",
+        "^- \\*\\*总体结论\\*\\*[:：]\\s*(?:通过|需要修改|拒绝|Approved|Changes Requested|Rejected)\\s*$",
+        "^- \\*\\*审查基线提交\\*\\*[:：]\\s*\\S",
+        "^- \\*\\*审查差异指纹\\*\\*[:：]\\s*sha256:[0-9a-f]{64}\\s*$"
+      ],
+      "freshness_minutes": 30
+    },
+    "activity-log": {
+      "expected_action_pattern": "(Review Code|Code Review) \\(Round \\d+\\)",
+      "freshness_minutes": 30
+    },
+    "platform-sync": {
+      "when": "issue_number_exists",
+      "expected_status_label": "status: in-progress",
+      "expected_comment_marker": "<!-- sync-issue:{task-id}:{artifact-stem} -->",
+      "verify_comment_content": true,
+      "verify_task_comment_content": true,
+      "verify_issue_type": true,
+      "verify_issue_fields": false,
+      "verify_milestone": true,
+      "expected_status_label_key": "inProgress",
+      "expected_comment_marker_key": "artifact"
+    }
+  }
+}

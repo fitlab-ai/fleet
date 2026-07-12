@@ -1,0 +1,196 @@
+# 缺陷修复工作流
+# 修复缺陷时使用此工作流。
+#
+# 注：步骤中的 `pr_tasks` 列表按「走 PR 路径」判定是否计入工作流进度：
+# `.agents/.airc.json:prFlow="required"` 始终计入；`prFlow="disabled"` 不计入；
+# 字段缺省时仅当 task.md 的 `pr_status=skipped` 排除，否则计入（详见 .agents/skills/complete-task/SKILL.md）。
+
+name: bug-fix
+description: 诊断和修复缺陷的工作流。
+
+steps:
+  - name: analysis
+    description: 复现缺陷，识别根本原因，确定修复范围。
+    recommended_agents:
+      - claude
+      - gemini
+    tasks:
+      - 理解缺陷报告和预期行为
+      - 复现缺陷（如果可能）
+      - 追踪代码路径以识别根本原因
+      - 确定受影响的文件和组件
+      - 将发现记录在任务文件中
+    inputs:
+      - 缺陷报告或 Issue 描述
+      - 复现步骤
+      - 项目代码库
+    artifact_versioning:
+      outputs:
+        - name: analysis
+          pattern: "analysis.md | analysis-r{N}.md"
+          rule: "扫描现有分析产物；首轮创建 analysis.md，后续修订创建 analysis-r{N}.md（N = 当前最高轮次 + 1）"
+    outputs:
+      - 根因分析
+      - 受影响文件列表
+      - 更新后的任务文件（分析部分）
+
+  - name: analysis-review
+    description: 审查缺陷分析是否复现充分、根因明确且修复范围清晰。
+    recommended_agents:
+      - claude
+      - gemini
+    tasks:
+      - 验证缺陷复现或不可复现说明
+      - 检查根因推导和影响范围
+      - 确认分析结论足以进入设计阶段
+      - 创建需求分析审查报告
+    inputs:
+      - 最新根因分析
+      - 缺陷报告或 Issue 描述
+    artifact_versioning:
+      inputs:
+        - name: analysis
+          pattern: "analysis.md | analysis-r{N}.md"
+          rule: "读取最高轮次的分析产物作为审查输入"
+      outputs:
+        - name: review-analysis
+          pattern: "review-analysis.md | review-analysis-r{N}.md"
+          rule: "扫描现有需求分析审查产物；首轮创建 review-analysis.md，后续轮次创建 review-analysis-r{N}.md（N = 当前最高轮次 + 1）"
+    outputs:
+      - 需求分析审查报告
+      - 待修正问题列表（如有）
+
+  - name: design
+    description: 规划修复方案并考虑边界情况。
+    recommended_agents:
+      - claude
+    tasks:
+      - 确定修复缺陷的最佳方案
+      - 识别修复的潜在副作用
+      - 规划验证修复的测试用例
+      - 在任务文件中记录修复方案
+    inputs:
+      - 已通过审查的根因分析
+      - 项目架构
+    artifact_versioning:
+      inputs:
+        - name: analysis
+          pattern: "analysis.md | analysis-r{N}.md"
+          rule: "读取最高轮次的分析产物作为设计输入"
+        - name: review-analysis
+          pattern: "review-analysis.md | review-analysis-r{N}.md"
+          rule: "读取最高轮次的需求分析审查产物，确认分析已获通过或已处理反馈"
+      outputs:
+        - name: plan
+          pattern: "plan.md | plan-r{N}.md"
+          rule: "扫描现有方案产物；首轮创建 plan.md，后续修订创建 plan-r{N}.md（N = 当前最高轮次 + 1）"
+    outputs:
+      - 任务文件中记录的修复方案
+      - 待添加的测试用例列表
+
+  - name: design-review
+    description: 审查修复方案是否覆盖根因、测试充分且副作用可控。
+    recommended_agents:
+      - claude
+      - gemini
+    tasks:
+      - 验证方案覆盖已批准的根因分析
+      - 检查回归测试策略和潜在副作用
+      - 确认方案足以进入编码阶段
+      - 创建技术方案审查报告
+    inputs:
+      - 最新修复方案
+      - 最新根因分析和审查报告
+    artifact_versioning:
+      inputs:
+        - name: plan
+          pattern: "plan.md | plan-r{N}.md"
+          rule: "读取最高轮次的方案产物作为审查输入"
+      outputs:
+        - name: review-plan
+          pattern: "review-plan.md | review-plan-r{N}.md"
+          rule: "扫描现有方案审查产物；首轮创建 review-plan.md，后续轮次创建 review-plan-r{N}.md（N = 当前最高轮次 + 1）"
+    outputs:
+      - 技术方案审查报告
+      - 待修正问题列表（如有）
+
+  - name: code
+    description: 实现缺陷修复并添加回归测试；在审查后再次执行同一阶段处理修复。
+    recommended_agents:
+      - codex
+      - cursor
+    tasks:
+      - 创建缺陷修复分支
+      - 实现修复
+      - 添加在没有修复时会失败的回归测试
+      - 修复最新 code-review 产物中要求处理的问题（如处于修复模式）
+      - 验证现有测试仍然通过
+      - 确保代码遵循项目规范
+    inputs:
+      - 已通过审查的修复方案
+      - 项目编码标准
+      - 最新代码审查报告（修复模式适用）
+    artifact_versioning:
+      inputs:
+        - name: plan
+          pattern: "plan.md | plan-r{N}.md"
+          rule: "读取最高轮次的方案产物作为实现输入"
+        - name: review-plan
+          pattern: "review-plan.md | review-plan-r{N}.md"
+          rule: "读取最高轮次的方案审查产物，确认方案已获通过或已处理反馈"
+        - name: review-code
+          pattern: "review-code.md | review-code-r{N}.md"
+          rule: "修复模式读取最高轮次的代码审查产物，并校验其与 task.md Activity Log 中最近一条 Review Code 记录一致"
+      outputs:
+        - name: code
+          pattern: "code.md | code-r{N}.md"
+          rule: "扫描现有实现产物；首轮创建 code.md，后续修复或重实现创建 code-r{N}.md（N = 当前最高轮次 + 1）"
+    outputs:
+      - 包含实现或修复的缺陷修复分支
+      - 回归测试文件
+      - 更新后的任务文件（实现备注）
+
+  - name: code-review
+    description: 验证修复是否正确和完整。
+    recommended_agents:
+      - claude
+    tasks:
+      - 验证修复是否解决了根本原因
+      - 检查回归测试是否充分
+      - 确保未引入新问题
+      - 验证修复不会破坏现有功能
+      - 创建代码审查报告
+    inputs:
+      - 缺陷修复分支
+      - 根因分析
+    artifact_versioning:
+      inputs:
+        - name: code
+          pattern: "code.md | code-r{N}.md"
+          rule: "读取最高轮次的实现产物作为审查输入"
+      outputs:
+        - name: review-code
+          pattern: "review-code.md | review-code-r{N}.md"
+          rule: "扫描现有代码审查产物；首轮创建 review-code.md，后续轮次创建 review-code-r{N}.md（N = 当前最高轮次 + 1）"
+    outputs:
+      - 代码审查报告
+      - 问题列表（如有）
+
+  - name: commit
+    description: 最终确认缺陷修复并创建拉取请求（PR 部分仅在走 PR 路径时执行）。
+    recommended_agents:
+      - claude
+      - human
+    tasks:
+      - 确保所有测试通过
+      - 编写引用缺陷/Issue 的提交信息
+      - 将任务移至已完成
+    pr_tasks:
+      - 创建包含缺陷修复描述的拉取请求
+      - 将 PR 关联到缺陷报告 Issue
+    inputs:
+      - 最终缺陷修复分支
+      - 任务文件
+    outputs:
+      - 已完成的任务文件（位于 .agents/workspace/completed/）
+      - 拉取请求（仅走 PR 路径时）
