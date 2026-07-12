@@ -1,3 +1,11 @@
 __pycache__/
 *.py[cod]
 .DS_Store
+
+# Agent workspace (temporary task data)
+.agents/workspace/active/
+.agents/workspace/blocked/
+.agents/workspace/completed/
+.agents/workspace/archive/
+.agents/workspace/logs/
+.agents/workspace/.merge-backup/
