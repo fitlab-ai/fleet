@@ -25,14 +25,22 @@ Usage:
 """
 
 import json
+import getpass
+import hashlib
 import os
-import signal
+import re
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
@@ -54,157 +62,370 @@ SING_BOX_CONFIG = CONFIG_DIR / "sing-box.json"
 SING_BOX_LOG = CONFIG_DIR / "sing-box.log"
 SING_BOX_BIN = "/opt/homebrew/bin/sing-box"
 CLASH_CONFIG = Path.home() / "Library/Application Support/com.follow.clash/config.yaml"
+SUBSCRIPTION_TIMEOUT_SECONDS = _env_int("FLEET_SUBSCRIPTION_TIMEOUT", 30)
+SUBSCRIPTION_MAX_BYTES = 10 * 1024 * 1024
+KEYCHAIN_SERVICE = "fleet.subscription"
+SUPPORTED_PROTOCOLS = ("vmess", "hysteria2", "anytls")
 PROXY_HOST = "127.0.0.1"
 PROXY_PORT = _env_int("FLEET_PORT", 7890)
 TUN_ADDR = "172.19.0.1/30"
 TUN_IFACE = ""
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# YAML parser
-# ═══════════════════════════════════════════════════════════════════════════════
+class SubscriptionError(Exception):
+    """A safe, user-displayable subscription failure."""
 
-def parse_clash_config(path: str) -> Dict[str, Any]:
-    ruby_config = _parse_yaml_with_ruby(path)
-    if ruby_config is not None:
-        return {
-            "proxies": ruby_config.get("proxies") or [],
-            "proxy_groups": ruby_config.get("proxy-groups") or [],
-        }
-
-    with open(path) as f:
-        lines = f.readlines()
-
-    proxies: List[Dict] = []
-    proxy_groups: List[Dict] = []
-    in_proxies = False
-    in_groups = False
-    current: Optional[Dict[str, Any]] = None
-    current_group: Optional[Dict[str, Any]] = None
-    current_key = ""
-    indent = 0
-
-    def flush():
-        nonlocal current, current_key
-        if current is not None and "name" in current:
-            proxies.append(current)
-        current = None
-        current_key = ""
-
-    for line in lines:
-        raw = line.rstrip()
-        if not raw or raw.strip().startswith("#"):
-            continue
-
-        stripped = raw.lstrip()
-        col = len(raw) - len(stripped)
-
-        if stripped.startswith("proxies:") and col == 0:
-            flush()
-            in_proxies = True
-            in_groups = False
-            continue
-        if stripped.startswith("proxy-groups:") and col == 0:
-            flush()
-            in_proxies = False
-            in_groups = True
-            indent = 0
-            continue
-        if col == 0 and in_proxies and not stripped.startswith(" "):
-            in_proxies = False
-
-        if in_proxies:
-            if stripped.startswith("- ") and col <= 2:
-                flush()
-                current = {}
-                key_val = stripped[2:]
-                if ":" in key_val:
-                    k, v = key_val.split(":", 1)
-                    k = k.strip()
-                    v = v.strip().strip('"')
-                    current[k] = _smart_value(v)
-                indent = col
-            elif current is not None and col > indent:
-                if ":" in stripped:
-                    k, v = stripped.split(":", 1)
-                    k = k.strip()
-                    v = v.strip().strip('"')
-                    target = current
-                    if current_key and isinstance(current.get(current_key), dict):
-                        target = current[current_key]
-                    if v == "":
-                        target[k] = {}
-                        current_key = k
-                    else:
-                        target[k] = _smart_value(v)
-                        if not (current_key and isinstance(current.get(current_key), dict)):
-                            current_key = ""
-                elif current_key and isinstance(current.get(current_key), dict) and ":" in stripped:
-                    k, v = stripped.split(":", 1)
-                    current[current_key][k.strip()] = v.strip().strip('"')
-                elif current_key == "alpn":
-                    current.setdefault("alpn", []).append(stripped.strip().strip('"').lstrip("- "))
-
-        if in_groups:
-            if stripped.startswith("- name:") and col <= 2:
-                current_group = {"name": stripped[2:].split(":", 1)[1].strip().strip('"'),
-                                 "proxies": [], "type": "select"}
-                proxy_groups.append(current_group)
-                indent = col
-            elif current_group is not None and col > indent:
-                if stripped.startswith("proxies:"):
-                    pass
-                elif stripped.startswith("- ") and not any(stripped[2:].strip().startswith(p) for p in ("type:", "url:", "interval:", "tolerance:")):
-                    current_group["proxies"].append(stripped[2:].strip().strip('"'))
-                elif stripped.startswith("type:"):
-                    current_group["type"] = stripped.split(":", 1)[1].strip().strip('"')
-
-    flush()
-    return {"proxies": proxies, "proxy_groups": proxy_groups}
+    def __init__(self, category: str, message: str):
+        super().__init__(message)
+        self.category = category
 
 
-def _parse_yaml_with_ruby(path: str) -> Optional[Dict[str, Any]]:
-    ruby = "/usr/bin/ruby"
-    if not Path(ruby).exists():
-        return None
+def _secure_mkdir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.chmod(0o700)
 
-    script = r"""
-require "json"
-require "yaml"
 
-content = File.read(ARGV[0])
-begin
-  data = YAML.safe_load(content, aliases: true)
-rescue ArgumentError
-  data = YAML.load(content)
-end
-puts JSON.generate(data || {})
-"""
+def _secure_write(path: Path, data: bytes) -> None:
+    _secure_mkdir(path.parent)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        result = subprocess.run([ruby, "-e", script, path],
+        handle = os.fdopen(fd, "wb")
+        fd = -1
+        with handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        if fd >= 0:
+            os.close(fd)
+        raise
+    finally:
+        path.chmod(0o600)
+
+
+def _atomic_json(path: Path, value: Dict[str, Any]) -> None:
+    _secure_mkdir(path.parent)
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    tmp = Path(name)
+    try:
+        os.chmod(name, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, ensure_ascii=False, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+        path.chmod(0o600)
+        dir_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _protocol_counts(nodes: List[Dict[str, Any]]) -> Dict[str, int]:
+    return {kind: sum(1 for node in nodes if node.get("type") == kind)
+            for kind in SUPPORTED_PROTOCOLS}
+
+
+class GenerationStore:
+    """Crash-safe immutable subscription generations with verified fallback."""
+
+    def __init__(self, root: Path = CONFIG_DIR):
+        self.root = Path(root)
+        self.generations = self.root / "generations"
+        self.current = self.root / "current.json"
+        self.legacy = self.root / "nodes.json"
+
+    def publish(self, source: bytes, nodes: List[Dict[str, Any]], counts: Dict[str, int]) -> str:
+        _secure_mkdir(self.root)
+        _secure_mkdir(self.generations)
+        generation = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        tmp = Path(tempfile.mkdtemp(prefix=".generation-", dir=self.generations))
+        os.chmod(tmp, 0o700)
+        nodes_data = json.dumps({"nodes": nodes, "groups": []}, ensure_ascii=False,
+                                indent=2).encode()
+        manifest = {
+            "schema": 1, "generation": generation,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "node_count": len(nodes), "protocol_counts": counts,
+            "source_sha256": _sha256(source), "nodes_sha256": _sha256(nodes_data),
+        }
+        final = self.generations / generation
+        try:
+            _secure_write(tmp / "source.yaml", source)
+            _secure_write(tmp / "nodes.json", nodes_data)
+            _secure_write(tmp / "manifest.json", json.dumps(manifest, indent=2).encode())
+            os.replace(tmp, final)
+            _atomic_json(self.current, {"generation": generation})
+        except Exception:
+            if tmp.exists():
+                shutil.rmtree(tmp, ignore_errors=True)
+            if final.exists():
+                shutil.rmtree(final, ignore_errors=True)
+            raise
+        self._cleanup(generation)
+        return generation
+
+    def _valid_generation(self, path: Path) -> Optional[tuple[List[Dict[str, Any]], str]]:
+        try:
+            manifest = json.loads((path / "manifest.json").read_text())
+            if manifest.get("schema") != 1 or manifest.get("generation") != path.name:
+                return None
+            source = (path / "source.yaml").read_bytes()
+            nodes_data = (path / "nodes.json").read_bytes()
+            if _sha256(source) != manifest.get("source_sha256") or _sha256(nodes_data) != manifest.get("nodes_sha256"):
+                return None
+            payload = json.loads(nodes_data)
+            nodes = payload.get("nodes") if isinstance(payload, dict) else None
+            if not isinstance(nodes, list) or len(nodes) != manifest.get("node_count"):
+                return None
+            if _protocol_counts(nodes) != manifest.get("protocol_counts"):
+                return None
+            return nodes, str(manifest.get("created_at", ""))
+        except (OSError, ValueError, TypeError):
+            return None
+
+    def load_nodes(self, warn: bool = False) -> List[Dict[str, Any]]:
+        current_name = ""
+        try:
+            pointer = json.loads(self.current.read_text())
+            candidate = pointer.get("generation") if isinstance(pointer, dict) else ""
+            if isinstance(candidate, str) and re.fullmatch(r"[A-Za-z0-9._-]+", candidate):
+                current_name = candidate
+                valid = self._valid_generation(self.generations / candidate)
+                if valid:
+                    return valid[0]
+        except (OSError, ValueError, TypeError):
+            pass
+        candidates = []
+        if self.generations.exists():
+            for path in self.generations.iterdir():
+                if path.is_dir() and path.name != current_name and not path.name.startswith("."):
+                    valid = self._valid_generation(path)
+                    if valid:
+                        candidates.append((valid[1], path.name, valid[0]))
+        if candidates:
+            if warn:
+                print("Warning: current cache failed integrity checks; using previous valid cache")
+            return max(candidates, key=lambda item: (item[0], item[1]))[2]
+        try:
+            payload = json.loads(self.legacy.read_text())
+            nodes = payload.get("nodes") if isinstance(payload, dict) else None
+            if isinstance(nodes, list):
+                if warn:
+                    print("Warning: using legacy node cache")
+                return nodes
+        except (OSError, ValueError, TypeError):
+            pass
+        if warn:
+            print("Node cache is missing or damaged. Run 'fleet refresh'.")
+        return []
+
+    def _cleanup(self, current: str) -> None:
+        valid = []
+        for path in self.generations.iterdir():
+            if path.is_dir() and not path.name.startswith(".") and self._valid_generation(path):
+                valid.append(path)
+        valid.sort(key=lambda p: p.name, reverse=True)
+        for path in valid[2:]:
+            if path.name != current:
+                shutil.rmtree(path, ignore_errors=True)
+
+
+class RefreshLock:
+    def __init__(self, root: Path):
+        self.path = Path(root) / "refresh.lock"
+
+    def __enter__(self):
+        _secure_mkdir(self.path.parent)
+        try:
+            fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            try:
+                pid = int(self.path.read_text().strip())
+                os.kill(pid, 0)
+            except (ValueError, OSError):
+                self.path.unlink(missing_ok=True)
+                fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            else:
+                raise SubscriptionError("lock", "Another subscription refresh is running")
+        with os.fdopen(fd, "w") as handle:
+            handle.write(str(os.getpid()))
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.path.unlink(missing_ok=True)
+
+
+class CredentialBackend:
+    def set_url(self, url: str) -> None:
+        raise NotImplementedError
+
+    def get_url(self) -> str:
+        raise NotImplementedError
+
+    def delete_url(self) -> None:
+        raise NotImplementedError
+
+    def is_configured(self) -> bool:
+        try:
+            return bool(self.get_url())
+        except SubscriptionError:
+            return False
+
+
+class KeychainCredentialBackend(CredentialBackend):
+    def __init__(self, runner=subprocess.run):
+        self.runner = runner
+        self.account = getpass.getuser()
+
+    def _run(self, args: List[str], input_text: Optional[str] = None, check: bool = True):
+        if sys.platform != "darwin":
+            raise SubscriptionError("credential", "macOS Keychain is unavailable on this platform")
+        result = self.runner(["/usr/bin/security", *args], input=input_text,
+                             capture_output=True, text=True, timeout=15)
+        if check and result.returncode != 0:
+            raise SubscriptionError("credential", "Keychain operation failed")
+        return result
+
+    def set_url(self, url: str) -> None:
+        self._run(["add-generic-password", "-U", "-s", KEYCHAIN_SERVICE,
+                   "-a", self.account, "-w", url])
+
+    def get_url(self) -> str:
+        result = self._run(["find-generic-password", "-s", KEYCHAIN_SERVICE,
+                            "-a", self.account, "-w"], check=False)
+        if result.returncode != 0 or not result.stdout.strip():
+            raise SubscriptionError("credential", "Subscription is not configured")
+        return result.stdout.strip()
+
+    def delete_url(self) -> None:
+        self._run(["delete-generic-password", "-s", KEYCHAIN_SERVICE,
+                   "-a", self.account], check=False)
+
+
+def validate_subscription_url(url: str) -> str:
+    value = url.strip()
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        raise SubscriptionError("credential", "A valid HTTPS subscription URL is required")
+    return value
+
+
+def validate_nodes(nodes: Any) -> tuple[List[Dict[str, Any]], Dict[str, int]]:
+    if not isinstance(nodes, list) or not nodes:
+        raise SubscriptionError("structure", "Subscription contains no proxy nodes")
+    names = set()
+    counts = {kind: 0 for kind in SUPPORTED_PROTOCOLS}
+    for node in nodes:
+        if not isinstance(node, dict):
+            raise SubscriptionError("node", "A proxy node is not an object")
+        name, server, kind, port = (node.get("name"), node.get("server"),
+                                    node.get("type"), node.get("port"))
+        if not isinstance(name, str) or not name.strip() or name in names:
+            raise SubscriptionError("node", "Proxy node names must be non-empty and unique")
+        names.add(name)
+        if not isinstance(server, str) or not server.strip():
+            raise SubscriptionError("node", "A proxy node has an invalid server")
+        if kind not in SUPPORTED_PROTOCOLS:
+            raise SubscriptionError("protocol", "Subscription contains an unsupported protocol")
+        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+            raise SubscriptionError("node", "A proxy node has an invalid port")
+        secret = "uuid" if kind == "vmess" else "password"
+        if not isinstance(node.get(secret), str) or not node[secret].strip():
+            raise SubscriptionError("node", f"A {kind} node is missing required credentials")
+        if "skip-cert-verify" in node and not isinstance(node["skip-cert-verify"], bool):
+            raise SubscriptionError("node", "skip-cert-verify must be boolean")
+        if kind == "vmess":
+            if "alterId" in node and (isinstance(node["alterId"], bool) or not isinstance(node["alterId"], int)):
+                raise SubscriptionError("node", "alterId must be an integer")
+            if node.get("network") == "ws" and "ws-opts" in node and not isinstance(node["ws-opts"], dict):
+                raise SubscriptionError("node", "ws-opts must be an object")
+        if kind == "anytls" and "alpn" in node and (not isinstance(node["alpn"], list) or not all(isinstance(v, str) for v in node["alpn"])):
+            raise SubscriptionError("node", "alpn must be a list of strings")
+        for field in ("up", "down"):
+            if kind == "hysteria2" and field in node and (isinstance(node[field], bool) or not isinstance(node[field], (int, float)) or node[field] <= 0):
+                raise SubscriptionError("node", f"{field} must be positive")
+        counts[kind] += 1
+    return nodes, counts
+
+
+def enforce_node_count(new_count: int, previous_count: int, force: bool) -> None:
+    if new_count < 1:
+        raise SubscriptionError("quantity", "Subscription contains no valid nodes")
+    if previous_count and new_count < previous_count * 0.5 and not force:
+        raise SubscriptionError("quantity", f"Node count shrank from {previous_count} to {new_count}; use --force to accept")
+
+
+def _parse_subscription_yaml_strict(path: Path) -> Dict[str, Any]:
+    script = r'''require "json"
+require "yaml"
+content = File.read(ARGV[0])
+data = YAML.safe_load(content, permitted_classes: [], permitted_symbols: [], aliases: true)
+puts JSON.generate(data || {})'''
+    try:
+        result = subprocess.run(["/usr/bin/ruby", "-e", script, str(path)],
                                 capture_output=True, text=True, timeout=20)
-    except Exception:
-        return None
+    except (OSError, subprocess.SubprocessError):
+        raise SubscriptionError("yaml", "Strict YAML parser is unavailable")
     if result.returncode != 0:
-        return None
+        raise SubscriptionError("yaml", "Subscription YAML is invalid")
     try:
         data = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return None
-    return data if isinstance(data, dict) else None
-
-
-def _smart_value(v: str) -> Union[str, int, float, bool]:
-    v = v.strip()
-    if v.isdigit():
-        return int(v)
-    try:
-        return float(v)
     except ValueError:
-        pass
-    if v.lower() in ("true", "false"):
-        return v.lower() == "true"
-    return v
+        raise SubscriptionError("yaml", "Subscription YAML produced invalid data")
+    if not isinstance(data, dict) or not isinstance(data.get("proxies"), list):
+        raise SubscriptionError("structure", "Subscription must contain a proxies list")
+    return data
+
+
+class HttpsOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urllib.parse.urlsplit(newurl).scheme != "https":
+            raise SubscriptionError("network", "Subscription redirect was rejected")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def download_subscription(url: str, opener=None, timeout: int = SUBSCRIPTION_TIMEOUT_SECONDS) -> bytes:
+    url = validate_subscription_url(url)
+    opener = opener or urllib.request.build_opener(HttpsOnlyRedirectHandler())
+    request = urllib.request.Request(url, headers={"User-Agent": "fleet/1 subscription-refresh"})
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            status = getattr(response, "status", 200)
+            if not 200 <= status < 300:
+                raise SubscriptionError("http", f"Subscription server returned HTTP {status}")
+            data = response.read(SUBSCRIPTION_MAX_BYTES + 1)
+    except SubscriptionError:
+        raise
+    except (urllib.error.URLError, OSError, TimeoutError):
+        raise SubscriptionError("network", "Subscription download failed")
+    if not data:
+        raise SubscriptionError("http", "Subscription response was empty")
+    if len(data) > SUBSCRIPTION_MAX_BYTES:
+        raise SubscriptionError("http", "Subscription response was too large")
+    return data
+
+
+def validate_with_sing_box(nodes: List[Dict[str, Any]], binary: str = SING_BOX_BIN) -> None:
+    if not Path(binary).exists():
+        raise SubscriptionError("sing-box", "sing-box is not installed")
+    with tempfile.TemporaryDirectory(prefix="fleet-check-") as tmp:
+        for index, node in enumerate(nodes):
+            path = Path(tmp) / f"node-{index}.json"
+            path.write_text(json.dumps(mk_proxy_config(node)))
+            result = subprocess.run([binary, "check", "-c", str(path)], capture_output=True,
+                                    text=True, timeout=30)
+            if result.returncode != 0:
+                name = node.get("name") or index
+                raise SubscriptionError("sing-box", f"Node '{name}' failed sing-box validation")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -264,9 +485,7 @@ def _build_outbound(node: Dict) -> Dict[str, Any]:
                          "password": node.get("password", ""), "tls": tls})
 
     else:
-        print(f"Warning: unknown type '{node_type}', falling back to vmess")
-        outbound.update({"type": "vmess", "server": server, "server_port": port,
-                         "uuid": node.get("uuid", "")})
+        raise SubscriptionError("protocol", "Unsupported proxy protocol")
 
     return outbound
 
@@ -810,26 +1029,167 @@ def cmd_switch(nodes: List[Dict], target: str, mode: Optional[str] = None):
     return 0
 
 
-def cmd_refresh():
-    if not CLASH_CONFIG.exists():
-        print(f"Clash config not found: {CLASH_CONFIG}")
-        for p in [Path.home() / ".config/clash/config.yaml",
-                  Path.home() / ".config/mihomo/config.yaml"]:
-            if p.exists():
-                print(f"Found at: {p}")
+def _read_subscription_state(config_dir: Path = CONFIG_DIR) -> Dict[str, Any]:
+    try:
+        value = json.loads((config_dir / "subscription-state.json").read_text())
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_subscription_state(value: Dict[str, Any], config_dir: Path = CONFIG_DIR) -> None:
+    _atomic_json(config_dir / "subscription-state.json", value)
+
+
+def _process_subscription(source: bytes, store: GenerationStore, force: bool,
+                          check_sing_box=True) -> tuple:
+    with tempfile.TemporaryDirectory(prefix="fleet-subscription-") as tmp:
+        path = Path(tmp) / "source.yaml"
+        path.write_bytes(source)
+        config = _parse_subscription_yaml_strict(path)
+    nodes, counts = validate_nodes(config["proxies"])
+    previous = len(store.load_nodes())
+    enforce_node_count(len(nodes), previous, force)
+    if check_sing_box:
+        validate_with_sing_box(nodes)
+    generation = store.publish(source, nodes, counts)
+    return generation, nodes, counts
+
+
+def cmd_refresh(force: bool = False, backend: Optional[CredentialBackend] = None,
+                config_dir: Path = CONFIG_DIR) -> int:
+    backend = backend or KeychainCredentialBackend()
+    store = GenerationStore(config_dir)
+    attempted = datetime.now(timezone.utc).isoformat()
+    try:
+        with RefreshLock(config_dir):
+            source = download_subscription(backend.get_url())
+            generation, nodes, counts = _process_subscription(source, store, force)
+        _write_subscription_state({"schema": 1, "configured": True,
+                                   "last_attempt": attempted, "last_success": attempted,
+                                   "generation": generation, "node_count": len(nodes),
+                                   "protocol_counts": counts}, config_dir)
+        print(f"✓ Refreshed {len(nodes)} nodes " + ", ".join(f"{k}: {v}" for k, v in counts.items()))
+        return 0
+    except SubscriptionError as exc:
+        state = _read_subscription_state(config_dir)
+        state.update({"schema": 1, "last_attempt": attempted,
+                      "last_error": exc.category})
+        try:
+            _write_subscription_state(state, config_dir)
+        except OSError:
+            pass
+        print(f"Refresh failed [{exc.category}]: {exc}")
         return 1
 
-    config = parse_clash_config(str(CLASH_CONFIG))
-    real = [p for p in config["proxies"]
-            if p.get("name") not in ("剩余流量：144.3 GB", "套餐到期：长期有效")]
 
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    NODES_FILE.write_text(json.dumps({"nodes": real, "groups": config["proxy_groups"]},
-                                     indent=2, ensure_ascii=False))
-    print(f"✓ Parsed {len(real)} nodes")
-    for i, p in enumerate(real):
-        print(f"  {i:2d} {p['name']}")
+def cmd_subscription_add(url: Optional[str], backend: Optional[CredentialBackend] = None) -> int:
+    backend = backend or KeychainCredentialBackend()
+    if not url:
+        url = sys.stdin.readline().strip()
+    try:
+        backend.set_url(validate_subscription_url(url or ""))
+        print("✓ Subscription configured")
+        return 0
+    except SubscriptionError as exc:
+        print(f"Subscription add failed [{exc.category}]: {exc}")
+        return 1
+
+
+def cmd_subscription_status(backend: Optional[CredentialBackend] = None,
+                            config_dir: Path = CONFIG_DIR) -> int:
+    backend = backend or KeychainCredentialBackend()
+    configured = backend.is_configured()
+    state = _read_subscription_state(config_dir)
+    print(f"Configured: {'yes' if configured else 'no'}")
+    if state.get("last_success"):
+        print(f"Last success: {state['last_success']}")
+    if state.get("last_error"):
+        print(f"Last error: {state['last_error']}")
+    if "node_count" in state:
+        print(f"Nodes: {state['node_count']}")
+        counts = state.get("protocol_counts", {})
+        print("Protocols: " + ", ".join(f"{k}={counts.get(k, 0)}" for k in SUPPORTED_PROTOCOLS))
     return 0
+
+
+def cmd_subscription_remove(backend: Optional[CredentialBackend] = None,
+                            config_dir: Path = CONFIG_DIR) -> int:
+    backend = backend or KeychainCredentialBackend()
+    try:
+        backend.delete_url()
+        state = config_dir / "subscription-state.json"
+        if state.exists():
+            state.unlink()
+        print("✓ Subscription removed; cached nodes retained")
+        return 0
+    except SubscriptionError as exc:
+        print(f"Subscription remove failed [{exc.category}]: {exc}")
+        return 1
+
+
+def _recover_subscription_url(config: Dict[str, Any]) -> Optional[str]:
+    for key in ("subscription-url", "subscription_url", "url"):
+        value = config.get(key)
+        if isinstance(value, str):
+            try:
+                return validate_subscription_url(value)
+            except SubscriptionError:
+                pass
+    return None
+
+
+def _migrate_subscription(source_path: Path, url: Optional[str],
+                          backend: CredentialBackend, config_dir: Path) -> int:
+    try:
+        source = source_path.read_bytes()
+        with tempfile.TemporaryDirectory(prefix="fleet-migrate-") as tmp:
+            path = Path(tmp) / "source.yaml"
+            path.write_bytes(source)
+            parsed = _parse_subscription_yaml_strict(path)
+        target_url = validate_subscription_url(url) if url else _recover_subscription_url(parsed)
+        if not target_url:
+            raise SubscriptionError("credential", "Subscription URL could not be recovered; use --url")
+        nodes, counts = validate_nodes(parsed["proxies"])
+        if len(nodes) != 44 or counts != {"vmess": 29, "hysteria2": 4, "anytls": 11}:
+            raise SubscriptionError("migration", "Source does not match the 44-node migration baseline")
+        validate_with_sing_box(nodes)
+        old_url = None
+        try:
+            old_url = backend.get_url()
+        except SubscriptionError:
+            pass
+        backend.set_url(target_url)
+        try:
+            generation = GenerationStore(config_dir).publish(source, nodes, counts)
+        except Exception:
+            if old_url:
+                backend.set_url(old_url)
+            else:
+                backend.delete_url()
+            raise
+        now = datetime.now(timezone.utc).isoformat()
+        _write_subscription_state({"schema": 1, "configured": True, "last_attempt": now,
+                                   "last_success": now, "generation": generation,
+                                   "node_count": 44, "protocol_counts": counts}, config_dir)
+        print("✓ Migrated 44 nodes (vmess: 29, hysteria2: 4, anytls: 11)")
+        return 0
+    except (OSError, SubscriptionError) as exc:
+        category = exc.category if isinstance(exc, SubscriptionError) else "migration"
+        print(f"Migration failed [{category}]: source could not be imported")
+        return 1
+
+
+def cmd_subscription_migrate(source_path: Path = CLASH_CONFIG, url: Optional[str] = None,
+                             backend: Optional[CredentialBackend] = None,
+                             config_dir: Path = CONFIG_DIR) -> int:
+    backend = backend or KeychainCredentialBackend()
+    try:
+        with RefreshLock(config_dir):
+            return _migrate_subscription(source_path, url, backend, config_dir)
+    except SubscriptionError as exc:
+        print(f"Migration failed [{exc.category}]: source could not be imported")
+        return 1
 
 
 def cmd_ping(nodes: List[Dict], target: Optional[str] = None):
@@ -955,10 +1315,7 @@ def _find_node(nodes: List[Dict], target: str) -> Optional[Dict]:
 
 
 def _load_nodes() -> List[Dict]:
-    if not NODES_FILE.exists():
-        print("No nodes cached. Run 'fleet refresh' first.")
-        return []
-    return json.loads(NODES_FILE.read_text()).get("nodes", [])
+    return GenerationStore(CONFIG_DIR).load_nodes(warn=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -972,7 +1329,11 @@ Two modes:
   tun     System-wide TUN + fake-IP DNS  (needs sudo, Docker auto-proxied)
 
 Commands:
-  refresh                   Parse Clash config, cache nodes
+  subscription add [URL]    Store subscription URL in macOS Keychain
+  subscription status       Show redacted subscription status
+  subscription remove       Remove credentials, retain cached nodes
+  subscription migrate      Import FlClash snapshot (use --url if needed)
+  refresh [--force]         Download, validate, and atomically cache nodes
   list                      List all nodes
   ping [name|index]         Test TCP latency to all/specific nodes
 
@@ -1005,6 +1366,33 @@ def main():
         return 0
 
     cmd = args[0]
+
+    if cmd == "subscription":
+        sub = args[1] if len(args) > 1 else ""
+        rest = args[2:]
+        if sub == "add":
+            return cmd_subscription_add(rest[0] if rest else None)
+        if sub == "status":
+            return cmd_subscription_status()
+        if sub == "remove":
+            return cmd_subscription_remove()
+        if sub == "migrate":
+            url = None
+            source = CLASH_CONFIG
+            index = 0
+            while index < len(rest):
+                if rest[index] == "--url" and index + 1 < len(rest):
+                    url = rest[index + 1]
+                    index += 2
+                elif rest[index] == "--source" and index + 1 < len(rest):
+                    source = Path(rest[index + 1])
+                    index += 2
+                else:
+                    print("Try: fleet subscription migrate [--url URL] [--source PATH]")
+                    return 1
+            return cmd_subscription_migrate(source, url)
+        print("Try: fleet subscription add|status|remove|migrate")
+        return 1
 
     # ── Subcommand: proxy ──
     if cmd == "proxy":
@@ -1040,7 +1428,10 @@ def main():
             return 1
     # ── Top-level commands ──
     elif cmd == "refresh":
-        return cmd_refresh()
+        if any(arg != "--force" for arg in args[1:]):
+            print("Try: fleet refresh [--force]")
+            return 1
+        return cmd_refresh(force="--force" in args[1:])
     elif cmd in ("list", "ls"):
         return cmd_list(_load_nodes())
     elif cmd == "start":
