@@ -84,11 +84,17 @@ an atomically replaced `current.json` selects the active generation. Readers
 verify manifest hashes and fall back to the previous valid generation, then a
 legacy `nodes.json`, if the active cache is damaged.
 
-`fleet refresh` validates the HTTPS response, strict YAML structure, all node
-fields, supported protocols (VMess, Hysteria2, AnyTLS), node counts, and every
-generated proxy config with `sing-box check`. A refresh that shrinks below 50%
-of the previous successful count is rejected unless `--force` is supplied.
-`--force` does not bypass any other validation.
+`fleet refresh` identifies itself as `clash.meta` so subscription services can
+return the supported Clash YAML format. Fleet does not decode Base64 URI lists
+or other subscription formats. A non-Clash top-level response fails with the
+safe `format` category; the response body, subscription URL, tokens, node names,
+servers, and credentials are not included in the error or refresh state.
+
+Refresh validates the HTTPS response, strict YAML structure, all node fields,
+supported protocols (VMess, Hysteria2, AnyTLS), node counts, and every generated
+proxy config with `sing-box check`. A refresh that shrinks below 50% of the
+previous successful count is rejected unless `--force` is supplied. `--force`
+does not bypass format or any other validation.
 
 Refresh uses a 30-second request timeout. Set a positive integer override when
 needed:
@@ -100,7 +106,9 @@ FLEET_SUBSCRIPTION_TIMEOUT=60 fleet refresh
 TLS certificate and hostname verification always remain enabled; there is no
 insecure mode. Refresh never starts, stops, or reloads sing-box and does not
 change the current system proxy, Fleet runtime state, or TUN route. Failed
-downloads and validation leave the last usable cache untouched.
+downloads, format negotiation, and validation leave the last usable cache
+untouched. `subscription-state.json` records only the safe `last_error`
+category, including `format` for unsupported top-level responses.
 
 `fleet subscription remove` deletes the Keychain credential and refresh status
 but intentionally retains cached nodes. FlClash is only consulted by the
