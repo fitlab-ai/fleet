@@ -7,7 +7,7 @@
   },
   "templateVersion": "v0.8.5",
   "sandbox": {
-    "engine": "colima",
+    "engine": "orbstack",
     "runtimes": [
       "node22"
     ],
