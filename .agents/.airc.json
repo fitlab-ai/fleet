@@ -5,7 +5,7 @@
   "platform": {
     "type": "github"
   },
-  "templateVersion": "v0.8.3",
+  "templateVersion": "v0.8.5",
   "sandbox": {
     "engine": "colima",
     "runtimes": [
@@ -47,7 +47,10 @@
       ".codex/hooks.json",
       ".git-hooks/check-version-format.sh",
       ".github/scripts/",
-      ".opencode/commands/"
+      ".opencode/commands/",
+      ".github/workflows/metadata-sync.yml",
+      ".github/workflows/pr-label.yml",
+      ".github/workflows/status-label.yml"
     ],
     "merged": [
       "**/post-release.*",
@@ -62,9 +65,15 @@
       ".agents/skills/upgrade-dependency/SKILL.*",
       ".claude/settings.json",
       ".git-hooks/pre-commit",
-      ".gitignore"
+      ".gitignore",
+      ".agents/rules/testing-discipline.*"
     ],
-    "ejected": []
+    "ejected": [],
+    "managedBaselines": {
+      ".github/workflows/metadata-sync.yml": "sha256:6372ce9f924220ec6042c48d4ea9148aadc48878c67c63e1e21ab073417774d2",
+      ".github/workflows/pr-label.yml": "sha256:8438d56392b63fe365d487b586bb2b242eb142dc3bbd24dd631e18b60e2e0a89",
+      ".github/workflows/status-label.yml": "sha256:c6939f9f86cdfedbc36b1c87b857ca41c0e8b4d6563c1bcd83a895e324e8f726"
+    }
   },
   "tuis": [
     "claude-code",

@@ -97,7 +97,7 @@ node .agents/scripts/validate-artifact.js check review-ledger .agents/workspace/
 node .agents/scripts/validate-artifact.js check post-review-commit .agents/workspace/active/{task-id} --skill complete-task --format text
 ```
 
-任一退出码非 0（fail/blocked）→ 按前置条件未满足处理，**停止**，不执行步骤 3-7。`--force` **不解除**本硬门禁：未关闭分歧必须先在账本闭合（`confirmed`/`closed`/`human-decided`），未复审 post-review 提交必须重新 `review-code` 或在账本追加 `post-review-commit` / `human-decided` 豁免行。
+任一退出码非 0（fail/blocked）→ 按前置条件未满足处理，**停止**，不执行步骤 3-7。若输出包含 `reviewed snapshot was not anchored`，必须先重新 `commit` 或 `review-code`；不得回退审查基线。`--force` **不解除**本硬门禁：未关闭分歧必须先在账本闭合（`confirmed`/`closed`/`human-decided`），已锚点后的未复审提交必须重新 `review-code` 或在账本追加 `post-review-commit` / `human-decided` 豁免行。
 
 > **⚠️ 前置条件分支判断 — 你必须先判断“继续”还是“停止”：**
 >
@@ -122,7 +122,7 @@ Please complete the missing steps first, or use --force to override.
 获取当前时间：
 
 ```bash
-date "+%Y-%m-%d %H:%M:%S%:z"
+date "+%Y-%m-%d %H:%M:%S%z" | sed 's/\([+-][0-9][0-9]\)\([0-9][0-9]\)$/\1:\2/'
 ```
 
 更新 `.agents/workspace/active/{task-id}/task.md`：
@@ -165,7 +165,7 @@ ls .agents/workspace/completed/{task-id}/task.md
 如果存在有效的 `issue_number`：
 - 先按 `.agents/rules/issue-sync.md` 的补发规则扫描并补发未发布的 `task.md`、`analysis*.md`、`review-analysis*.md`、`plan*.md`、`review-plan*.md`、`code*.md`、`review-code*.md` 评论（`task.md` 走幂等更新路径）
 - 按 issue-sync.md 的需求复选框同步步骤，兜底同步 `## 需求` 中已勾选的条目到 Issue body
-- 不要设置 `status:` label — Issue 关闭后 status label 会被自动清除
+- 不要设置 `status:` label — 平台自动化应在 Issue 关闭后清理状态标签；预完成 platform-sync gate 会验证 CLOSED Issue 不含任何 `status:` 标签，残留时失败并要求等待或修复 workflow 后重跑
 - 最后创建或更新 `.agents/rules/issue-sync.md` 中定义的 summary 评论标记对应的 summary 评论
 - 读取 `.agents/rules/issue-fields.md`，按流程 A 把 `task.md` 中所有非空的 Issue 字段（`priority`/`effort`/`start_date`/`target_date`）同步到 Issue（幂等；`has_push=false` 或取数/写入失败时跳过，不阻断）
 

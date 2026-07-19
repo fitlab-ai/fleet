@@ -9,7 +9,7 @@
 先获取当前时间：
 
 ```bash
-date "+%Y-%m-%d %H:%M:%S%:z"
+date "+%Y-%m-%d %H:%M:%S%z" | sed 's/\([+-][0-9][0-9]\)\([0-9][0-9]\)$/\1:\2/'
 ```
 
 对于每一次与任务相关的提交，都要在 `task.md` 中追加以下 Activity Log：
@@ -18,13 +18,40 @@ date "+%Y-%m-%d %H:%M:%S%:z"
 - {YYYY-MM-DD HH:mm:ss±HH:MM} — **Commit** by {agent} — {commit hash short} {commit subject}
 ```
 
-如果提交阶段已确认最高轮 `review-code` 产物 Approved、`pre_head` 等于其审查基线提交 `R`、且 staged 差异指纹 `S` 等于其审查差异指纹 `F`，同时写入或刷新：
+如果提交阶段已确认最高轮 `review-code` 产物 Approved、`pre_head == R`、完整工作区树 `W == T` 且规范化暂存树 `S == T`，成功提交后同时写入或刷新：
 
 ```yaml
 last_reviewed_commit: {new_head}
 ```
 
-该字段是 `complete-task` 的 `post-review-commit` gate 优先 baseline。条件不满足时不要写入或推进该字段。
+该字段是 `complete-task` 的 `post-review-commit` gate 唯一 baseline。条件不满足时不要写入或推进该字段。
+
+### 场景 4：提交前快照阻断
+
+此场景在 `git commit` 前终止本轮，不进入下方提交成功后的场景选择。任一 `pre_head != R`、`W != T` 或 `S != T` 命中时：
+
+- 不执行 `git commit`、push、成功状态更新、Issue/PR 成功同步或 commit 完成 gate；保留当前工作区与暂存区。
+- 刷新任务的 `updated_at`、`assigned_to`、`agent_infra_version`，并以 action `Commit` 追加 done 日志：`Blocked before git commit: reviewed snapshot mismatch (worktree added={a}, missing={m}, different={d}; staged added={a}, missing={m}, different={d})`。
+- 用户输出必须包含 `No commit was created.`，并分别按 `Current worktree vs reviewed snapshot`、`Staged snapshot vs reviewed snapshot` 展示 Added/Missing/Different；空集合显示 `- (none)`，路径只在用户输出中逐行展示。
+- `pre_head != R` 或 `W != T` 时，下一步只指向重新 `review-code`；仅 `W == T && S != T` 时，提示修正暂存后重跑 `commit`，无需重审。
+
+重新审查的完整命令：
+
+```text
+下一步 - 重新代码审查：
+  - Claude Code / OpenCode: /review-code {task-ref}
+  - Gemini CLI: /fleet:review-code {task-ref}
+  - Codex CLI: $review-code {task-ref}
+```
+
+仅修正暂存的完整命令：
+
+```text
+下一步 - 修正暂存后重新提交：
+  - Claude Code / OpenCode: /commit {task-ref}
+  - Gemini CLI: /fleet:commit {task-ref}
+  - Codex CLI: $commit {task-ref}
+```
 
 在决定下一步之前，先确认：
 - `task.md` 中的 `current_step` 和最新工作流进度
@@ -60,7 +87,7 @@ last_reviewed_commit: {new_head}
 ```text
 下一步 - 完成并归档任务：
   - Claude Code / OpenCode: /complete-task {task-ref}
-  - Gemini CLI: /agent-infra:complete-task {task-ref}
+  - Gemini CLI: /fleet:complete-task {task-ref}
   - Codex CLI: $complete-task {task-ref}
 ```
 
@@ -69,7 +96,7 @@ last_reviewed_commit: {new_head}
 ```text
 下一步 - 创建 Pull Request：
   - Claude Code / OpenCode: /create-pr {task-ref}
-  - Gemini CLI: /agent-infra:create-pr {task-ref}
+  - Gemini CLI: /fleet:create-pr {task-ref}
   - Codex CLI: $create-pr {task-ref}
 ```
 
@@ -79,11 +106,11 @@ last_reviewed_commit: {new_head}
 下一步 - 二选一：
   - 走 PR 流程：
     - Claude Code / OpenCode: /create-pr {task-ref}
-    - Gemini CLI: /agent-infra:create-pr {task-ref}
+    - Gemini CLI: /fleet:create-pr {task-ref}
     - Codex CLI: $create-pr {task-ref}
   - 直接完成（无 PR）：
     - Claude Code / OpenCode: /complete-task {task-ref}
-    - Gemini CLI: /agent-infra:complete-task {task-ref}
+    - Gemini CLI: /fleet:complete-task {task-ref}
     - Codex CLI: $complete-task {task-ref}
 ```
 
@@ -108,7 +135,7 @@ last_reviewed_commit: {new_head}
 ```text
 下一步 - 代码审查：
   - Claude Code / OpenCode: /review-code {task-ref}
-  - Gemini CLI: /agent-infra:review-code {task-ref}
+  - Gemini CLI: /fleet:review-code {task-ref}
   - Codex CLI: $review-code {task-ref}
 ```
 

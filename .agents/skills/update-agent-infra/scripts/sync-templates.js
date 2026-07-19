@@ -14,10 +14,16 @@
  */
 
 import childProcess from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import {
+  formatAgentInfraPackageError,
+  resolveAgentInfraPackage
+} from '../../../scripts/lib/agent-infra-package.js';
 
 const DEFAULTS = {
   "platform": {
@@ -65,7 +71,15 @@ const DEFAULTS = {
       ".gemini/commands/",
       ".git-hooks/check-version-format.sh",
       ".github/scripts/",
+      ".github/workflows/metadata-sync.yml",
+      ".github/workflows/pr-label.yml",
+      ".github/workflows/status-label.yml",
       ".opencode/commands/"
+    ],
+    "guardedManaged": [
+      ".github/workflows/metadata-sync.yml",
+      ".github/workflows/pr-label.yml",
+      ".github/workflows/status-label.yml"
     ],
     "merged": [
       "**/post-release.*",
@@ -73,6 +87,7 @@ const DEFAULTS = {
       "**/test-integration.*",
       "**/test.*",
       "**/upgrade-dependency.*",
+      ".agents/rules/testing-discipline.*",
       ".agents/skills/post-release/SKILL.*",
       ".agents/skills/release/SKILL.*",
       ".agents/skills/test-integration/SKILL.*",
@@ -87,7 +102,6 @@ const DEFAULTS = {
   }
 };
 
-const PACKAGE_NAME = '@fitlab-ai/agent-infra';
 const AGENT_INFRA_SANDBOX_TOOL = 'agent-infra';
 const LEGACY_DEFAULT_SANDBOX_TOOLS = ['claude-code', 'codex', 'gemini-cli', 'opencode'];
 const DEFAULT_SANDBOX_TOOLS = [AGENT_INFRA_SANDBOX_TOOL, ...LEGACY_DEFAULT_SANDBOX_TOOLS];
@@ -149,6 +163,14 @@ function migrateSandboxTools(cfg) {
 }
 
 function norm(p) { return p.replace(/\\/g, '/'); }
+
+function sha256(content) {
+  return `sha256:${crypto.createHash('sha256').update(content).digest('hex')}`;
+}
+
+function trustedBaseline(value) {
+  return typeof value === 'string' && /^sha256:[a-f0-9]{64}$/.test(value) ? value : null;
+}
 
 function normDir(p) {
   return norm(p).replace(/^\.\//, '').replace(/\/+$/, '');
@@ -235,7 +257,7 @@ function parseSkillFrontmatter(filePath) {
     if (!pair) continue;
 
     const [, key, rawValue] = pair;
-    if (rawValue === '>') {
+    if (rawValue === '>' || rawValue === '|') {
       const block = [];
       for (let offset = index + 1; offset < lines.length; offset += 1) {
         const nextLine = lines[offset];
@@ -244,7 +266,7 @@ function parseSkillFrontmatter(filePath) {
         block.push(nextLine.trim());
         index = offset;
       }
-      result[key] = block.join(' ').trim();
+      result[key] = block.join(rawValue === '|' ? '\n' : ' ').trim();
       continue;
     }
 
@@ -286,7 +308,8 @@ function detectCustomSkills(projectRoot, templateSkillNames) {
         dirName: entry.name,
         name: meta.name || entry.name,
         description: meta.description || '',
-        args: meta.args || null
+        args: meta.args || null,
+        disableModelInvocation: meta['disable-model-invocation'] === 'true'
       };
     })
     .filter(Boolean)
@@ -501,12 +524,33 @@ function cleanStaleSyncedFiles(projectRoot, syncedSkills, report) {
   }
 }
 
+function formatYamlMetadata(key, value) {
+  if (!value.includes('\n')) {
+    return [`${key}: ${JSON.stringify(value)}`];
+  }
+
+  return [`${key}: |-`, ...value.split('\n').map((line) => `  ${line}`)];
+}
+
+function formatTomlMetadata(key, value) {
+  if (!value.includes('\n')) {
+    return `${key} = ${JSON.stringify(value)}`;
+  }
+
+  const lines = value.split('\n').map((line) => JSON.stringify(line).slice(1, -1));
+  return `${key} = """${lines.join('\n')}"""`;
+}
+
 function generateClaudeCommand(skill, lang) {
   const isZhCN = lang === 'zh-CN';
-  const lines = ['---', `description: ${JSON.stringify(skill.description)}`];
+  const lines = ['---', ...formatYamlMetadata('description', skill.description)];
 
   if (skill.args) {
     lines.push(`usage: ${JSON.stringify(`/${skill.dirName} ${skill.args}`)}`);
+  }
+
+  if (skill.disableModelInvocation) {
+    lines.push('disable-model-invocation: true');
   }
 
   lines.push('---', '');
@@ -539,7 +583,7 @@ function generateGeminiCommand(skill, lang) {
   promptLines.push(isZhCN ? '严格按照技能中定义的所有步骤执行。' : 'Follow all steps defined in the skill exactly.');
 
   return [
-    `description = ${JSON.stringify(skill.description)}`,
+    formatTomlMetadata('description', skill.description),
     'prompt = """',
     ...promptLines,
     '"""'
@@ -550,7 +594,7 @@ function generateOpenCodeCommand(skill, lang) {
   const isZhCN = lang === 'zh-CN';
   const lines = [
     '---',
-    `description: ${JSON.stringify(skill.description)}`,
+    ...formatYamlMetadata('description', skill.description),
     'agent: general',
     'subtask: false',
     '---',
@@ -816,117 +860,6 @@ function stripLangVariant(relativePath) {
   return relativePath;
 }
 
-function isTemplateDir(dir) {
-  try {
-    return fs.statSync(dir).isDirectory();
-  } catch {
-    return false;
-  }
-}
-
-function verifyPackageDir(dir) {
-  const pkgPath = path.join(dir, 'package.json');
-  if (!fs.existsSync(pkgPath)) {
-    return { templateRoot: null, reason: `package.json not found at ${pkgPath}` };
-  }
-
-  let pkg;
-  try {
-    pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-  } catch {
-    return { templateRoot: null, reason: `invalid package.json at ${pkgPath}` };
-  }
-
-  if (pkg.name !== PACKAGE_NAME) {
-    const packageName = typeof pkg.name === 'string' && pkg.name ? pkg.name : 'an unknown package';
-    return { templateRoot: null, reason: `${pkgPath} belongs to ${packageName}` };
-  }
-
-  const templateRoot = path.join(dir, 'templates');
-  if (!isTemplateDir(templateRoot)) {
-    return { templateRoot: null, reason: `templates/ not found at ${templateRoot}` };
-  }
-
-  return { templateRoot, reason: null };
-}
-
-function resolveUnixTemplateRoot(name) {
-  let linkPath;
-  try {
-    linkPath = childProcess.execSync(`command -v ${name}`, {
-      encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe']
-    }).trim();
-  } catch {
-    return { templateRoot: null, reason: 'not found in PATH' };
-  }
-
-  if (!linkPath) {
-    return { templateRoot: null, reason: 'not found in PATH' };
-  }
-
-  let realPath;
-  try {
-    realPath = fs.realpathSync(linkPath);
-  } catch {
-    return { templateRoot: null, reason: `cannot resolve symlink target for ${linkPath}` };
-  }
-
-  let dir = path.dirname(realPath);
-  while (true) {
-    const pkgPath = path.join(dir, 'package.json');
-    if (fs.existsSync(pkgPath)) {
-      return verifyPackageDir(dir);
-    }
-
-    const parentDir = path.dirname(dir);
-    if (parentDir === dir) {
-      break;
-    }
-    dir = parentDir;
-  }
-
-  return { templateRoot: null, reason: `no package.json found above ${realPath}` };
-}
-
-function resolveWindowsTemplateRoot(name) {
-  let output;
-  try {
-    output = childProcess.execSync(`where ${name}`, {
-      encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe']
-    }).trim();
-  } catch {
-    return { templateRoot: null, reason: 'not found in PATH' };
-  }
-
-  const wrapperPaths = output.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
-  if (wrapperPaths.length === 0) {
-    return { templateRoot: null, reason: 'not found in PATH' };
-  }
-
-  const wrapperPath = wrapperPaths.find(line => /\.cmd$/i.test(line)) || wrapperPaths[0];
-  const packageDir = path.join(path.dirname(wrapperPath), 'node_modules', '@fitlab-ai', 'agent-infra');
-  return verifyPackageDir(packageDir);
-}
-
-function resolveTemplateRoot() {
-  const resolver = process.platform === 'win32'
-    ? resolveWindowsTemplateRoot
-    : resolveUnixTemplateRoot;
-  const errors = [];
-
-  for (const name of ['ai', 'agent-infra']) {
-    const result = resolver(name);
-    if (result.templateRoot) {
-      return result.templateRoot;
-    }
-    errors.push({ name, reason: result.reason });
-  }
-
-  return { templateRoot: null, errors };
-}
-
 function isBinary(fp) {
   const fd = fs.openSync(fp, 'r');
   const buf = Buffer.alloc(8192);
@@ -1014,25 +947,14 @@ function syncTemplates(projectRoot, templateRootOverride) {
   const configPathRel = norm(path.relative(projectRoot, cfgPath));
   let templateRoot = templateRootOverride;
   if (!templateRoot) {
-    const resolvedTemplateRoot = resolveTemplateRoot();
-    if (typeof resolvedTemplateRoot === 'string') {
-      templateRoot = resolvedTemplateRoot;
+    const packageResolution = resolveAgentInfraPackage({
+      startPath: path.join(projectRoot, '.agents', 'scripts', 'lib', 'agent-infra-package.js')
+    });
+    if (packageResolution.templateRoot && fs.existsSync(packageResolution.templateRoot)) {
+      templateRoot = packageResolution.templateRoot;
     } else {
-      const details = resolvedTemplateRoot.errors
-        .map(({ name, reason }) => `  - ${name}: ${reason}`)
-        .join('\n');
       return {
-        error: [
-          'Template source not found.',
-          '',
-          'Attempted binary lookups:',
-          details,
-          '',
-          'Please ensure agent-infra is installed and available on PATH.',
-          'If already installed, upgrade to the latest version or reinstall:',
-          '  npm install -g @fitlab-ai/agent-infra',
-          '  brew upgrade fitlab-ai/agent-infra/agent-infra || brew install fitlab-ai/agent-infra/agent-infra'
-        ].join('\n')
+        error: formatAgentInfraPackageError(packageResolution)
       };
     }
   }
@@ -1050,6 +972,19 @@ function syncTemplates(projectRoot, templateRootOverride) {
   const managed = [...(cfg.files.managed || [])];
   const merged  = [...(cfg.files.merged  || [])];
   const ejected = [...(cfg.files.ejected || [])];
+  const guardedManaged = new Set((DEFAULTS.files.guardedManaged || []).map(norm));
+  const managedBaselines = cfg.files.managedBaselines && typeof cfg.files.managedBaselines === 'object'
+    && !Array.isArray(cfg.files.managedBaselines)
+    ? { ...cfg.files.managedBaselines }
+    : {};
+  let baselinesChanged = false;
+
+  for (const target of Object.keys(managedBaselines)) {
+    if (!guardedManaged.has(norm(target))) {
+      delete managedBaselines[target];
+      baselinesChanged = true;
+    }
+  }
 
   const report = {
     templateVersion: version,
@@ -1062,7 +997,17 @@ function syncTemplates(projectRoot, templateRootOverride) {
       errors: [],
       conflicts: []
     },
-    managed: { written: [], created: [], unchanged: [], skippedMerged: [], skippedPlatform: [], skippedTUI: [], removed: [] },
+    managed: {
+      written: [],
+      created: [],
+      unchanged: [],
+      protected: [],
+      conflicts: [],
+      skippedMerged: [],
+      skippedPlatform: [],
+      skippedTUI: [],
+      removed: []
+    },
     custom: {
       detected: [],
       generated: [],
@@ -1104,6 +1049,22 @@ function syncTemplates(projectRoot, templateRootOverride) {
   const allRels = mergedRels;
   const allSet = new Set(allRels);
 
+  function renderedTemplate(entry) {
+    const target = norm(renderPathname(entry, project));
+    const selected = platformSelect(
+      langSelect(entryVariantRels(entry, allSet, platformType), lang, allSet, project),
+      platformType,
+      project
+    );
+    const src = selected.get(target);
+    if (!src) return null;
+    const srcRoot = sourceMap.get(src) || templateRoot;
+    const srcFull = path.join(srcRoot, src);
+    return isBinary(srcFull)
+      ? fs.readFileSync(srcFull)
+      : renderContent(fs.readFileSync(srcFull, 'utf8'), vars);
+  }
+
   for (const entry of [...managed, ...merged, ...ejected]) {
     if (!isPathOwnedByOtherPlatform(entry, platformType)) continue;
 
@@ -1112,17 +1073,49 @@ function syncTemplates(projectRoot, templateRootOverride) {
       if (!fs.existsSync(dir)) continue;
 
       for (const filePath of walkDir(dir)) {
+        const relativeFile = norm(path.relative(projectRoot, filePath));
+        if (guardedManaged.has(relativeFile)) continue;
         fs.unlinkSync(filePath);
-        report.managed.removed.push(norm(path.relative(projectRoot, filePath)));
+        report.managed.removed.push(relativeFile);
       }
       removeEmptyDirs(dir);
       continue;
     }
 
-    const target = path.join(projectRoot, renderPathname(entry, project));
-    if (!fs.existsSync(target)) continue;
-    fs.unlinkSync(target);
-    report.managed.removed.push(norm(path.relative(projectRoot, target)));
+    const renderedTarget = norm(renderPathname(entry, project));
+    const target = path.join(projectRoot, renderedTarget);
+    if (!guardedManaged.has(renderedTarget)) {
+      if (!fs.existsSync(target)) continue;
+      fs.unlinkSync(target);
+      report.managed.removed.push(renderedTarget);
+      continue;
+    }
+
+    const baseline = trustedBaseline(managedBaselines[renderedTarget]);
+    const templateContent = renderedTemplate(entry);
+    const templateHash = templateContent === null ? null : sha256(templateContent);
+    const localHash = fs.existsSync(target) ? sha256(fs.readFileSync(target)) : null;
+    const safeToRemove = localHash !== null && (localHash === baseline || (!baseline && localHash === templateHash));
+
+    if (safeToRemove) {
+      fs.unlinkSync(target);
+      report.managed.removed.push(renderedTarget);
+      if (Object.prototype.hasOwnProperty.call(managedBaselines, renderedTarget)) {
+        delete managedBaselines[renderedTarget];
+        baselinesChanged = true;
+      }
+      continue;
+    }
+
+    if (localHash !== null || baseline !== null) {
+      report.managed.conflicts.push({
+        target: renderedTarget,
+        reason: localHash === null ? 'platform-switch-deleted' : 'platform-switch-modified',
+        baseline,
+        local: localHash,
+        template: templateHash
+      });
+    }
   }
 
   // Cleanup files owned by disabled built-in TUIs. Iterates managed + merged
@@ -1207,6 +1200,68 @@ function syncTemplates(projectRoot, templateRootOverride) {
         : renderContent(fs.readFileSync(srcFull, 'utf8'), vars);
 
       const exists = fs.existsSync(dstFull);
+      if (guardedManaged.has(tgt)) {
+        const rawBaseline = managedBaselines[tgt];
+        const baseline = trustedBaseline(rawBaseline);
+        const templateHash = sha256(content);
+        const localHash = exists ? sha256(fs.readFileSync(dstFull)) : null;
+
+        if (rawBaseline !== undefined && baseline === null) {
+          delete managedBaselines[tgt];
+          baselinesChanged = true;
+        }
+
+        if (baseline === null && localHash !== null && localHash !== templateHash) {
+          report.managed.conflicts.push({
+            target: tgt,
+            reason: 'unknown-origin',
+            baseline: null,
+            local: localHash,
+            template: templateHash
+          });
+          continue;
+        }
+
+        if (baseline !== null && templateHash === baseline && localHash !== baseline) {
+          report.managed.protected.push({
+            target: tgt,
+            reason: localHash === null ? 'user-deleted' : 'user-modified',
+            baseline,
+            local: localHash,
+            template: templateHash
+          });
+          continue;
+        }
+
+        if (baseline !== null && localHash !== baseline && templateHash !== baseline && localHash !== templateHash) {
+          report.managed.conflicts.push({
+            target: tgt,
+            reason: 'both-modified',
+            baseline,
+            local: localHash,
+            template: templateHash
+          });
+          continue;
+        }
+
+        if (localHash === templateHash) {
+          report.managed.unchanged.push(tgt);
+          if (managedBaselines[tgt] !== templateHash) {
+            managedBaselines[tgt] = templateHash;
+            baselinesChanged = true;
+          }
+          continue;
+        }
+
+        const dir = path.dirname(dstFull);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(dstFull, content);
+        managedBaselines[tgt] = templateHash;
+        baselinesChanged = true;
+        (exists ? report.managed.written : report.managed.created).push(tgt);
+        continue;
+      }
+
       if (exists) {
         const cur = bin ? fs.readFileSync(dstFull) : fs.readFileSync(dstFull, 'utf8');
         if (bin ? content.equals(cur) : content === cur) {
@@ -1332,10 +1387,16 @@ function syncTemplates(projectRoot, templateRootOverride) {
   cfg.files.managed = managed;
   cfg.files.merged  = merged;
   cfg.files.ejected = ejected;
+  if (Object.keys(managedBaselines).length > 0) {
+    cfg.files.managedBaselines = managedBaselines;
+  } else {
+    if (Object.prototype.hasOwnProperty.call(cfg.files, 'managedBaselines')) baselinesChanged = true;
+    delete cfg.files.managedBaselines;
+  }
   cfg.templateVersion = version;
   delete cfg.templateSource;
 
-  report.configUpdated = hasChanges || prevVersion !== version || hadTemplateSource || sandboxToolsMigrated;
+  report.configUpdated = hasChanges || baselinesChanged || prevVersion !== version || hadTemplateSource || sandboxToolsMigrated;
 
   fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
 

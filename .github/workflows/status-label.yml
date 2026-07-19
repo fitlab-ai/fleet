@@ -1,0 +1,75 @@
+name: Status Label Automation
+
+on:
+  issues:
+    types: [closed, reopened]
+  pull_request_target:
+    types: [closed]
+
+permissions:
+  issues: write
+  pull-requests: read
+
+jobs:
+  manage-status-labels:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout shared scripts
+        if: >-
+          (github.event_name == 'issues' && github.event.action == 'closed' && github.event.issue.state_reason == 'completed') ||
+          (github.event_name == 'issues' && github.event.action == 'reopened') ||
+          (github.event_name == 'pull_request_target' && github.event.action == 'closed' && github.event.pull_request.merged == true)
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
+
+      - name: Remove status labels on issue close
+        if: >-
+          github.event_name == 'issues' &&
+          github.event.action == 'closed' &&
+          github.event.issue.state_reason == 'completed'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          .github/scripts/sync-labels-to-set.sh \
+            --repo "$GITHUB_REPOSITORY" \
+            --issue "$ISSUE_NUMBER" \
+            --prefix "status:"
+
+      - name: Add triage label on issue reopen
+        if: github.event_name == 'issues' && github.event.action == 'reopened'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          .github/scripts/sync-labels-to-set.sh \
+            --repo "$GITHUB_REPOSITORY" \
+            --issue "$ISSUE_NUMBER" \
+            --prefix "status:" \
+            --target "status: waiting-for-triage"
+
+      - name: Clean status labels on PR merge
+        if: >-
+          github.event_name == 'pull_request_target' &&
+          github.event.action == 'closed' &&
+          github.event.pull_request.merged == true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          issue_numbers=$(printf '%s' "${PR_BODY:-}" \
+            | grep -ioE '(closes|fixes|resolves)\s+#[0-9]+' \
+            | grep -oE '[0-9]+' || true)
+          for issue_number in $issue_numbers; do
+            state=$(gh issue view "$issue_number" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json state --jq '.state')
+            if [ "$state" = "CLOSED" ]; then
+              .github/scripts/sync-labels-to-set.sh \
+                --repo "$GITHUB_REPOSITORY" \
+                --issue "$issue_number" \
+                --prefix "status:"
+            fi
+          done

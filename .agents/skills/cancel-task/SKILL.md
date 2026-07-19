@@ -57,7 +57,7 @@ description: >
 获取当前时间：
 
 ```bash
-date "+%Y-%m-%d %H:%M:%S%:z"
+date "+%Y-%m-%d %H:%M:%S%z" | sed 's/\([+-][0-9][0-9]\)\([0-9][0-9]\)$/\1:\2/'
 ```
 
 更新任务目录中的 `task.md`：
@@ -149,7 +149,7 @@ ai sandbox rm {branch}
 
 下一步 - 查看已转移任务：
   - Claude Code / OpenCode：/check-task {task-ref}
-  - Gemini CLI：/agent-infra:check-task {task-ref}
+  - Gemini CLI：/fleet:check-task {task-ref}
   - Codex CLI：$check-task {task-ref}
 ```
 

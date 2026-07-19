@@ -165,10 +165,13 @@
 name: enforce-style
 description: "在代码审查前应用团队风格规范。当需要在评审前统一团队代码风格时使用"
 args: "<task-id>"   # 可选
+disable-model-invocation: true   # 可选；由支持该能力的 TUI 适配器消费
 ---
 ```
 
 `description` 采用「一句话职责 + 场景触发子句」写法：在简短职责描述后补充「当……时使用」（英文 `SKILL.en.md` 用「Use when …」），作为跨 TUI 的触发语义，供支持 Agent Skills 的工具在自然对话中自发现该 skill。**不要**为此新增 `triggers` 等额外 frontmatter 字段。
+
+当生成的 TUI 命令需要禁用模型调用时，将通用可选字段 `disable-model-invocation` 设为 `true`；各 TUI 适配器按自身能力决定是否消费。多行 `description` 如需保留换行，使用 YAML literal block（`|`）；同步器会为各 TUI 输出对应的多行元数据格式。
 
 新增或修改自定义 skill 后，再执行一次 `update-agent-infra`。同步过程会自动检测非内置 skill，并为 Claude Code、Gemini CLI、OpenCode 生成对应命令。
 
@@ -205,6 +208,8 @@ args: "<task-id>"   # 可选
 | `managed` | 从模板写入并覆盖 | 视为模板已下线 | 删除项目本地副本 |
 | `merged` | 由 AI 或人工语义合并 | 不从模板写入 | 保留项目本地副本 |
 | `ejected` | 首次可从模板创建，已存在时跳过覆盖 | 不从模板写入 | 保留项目本地副本 |
+
+普通 `managed` 文件仍采用覆盖语义。少数平台生命周期 workflow 可登记为 guarded managed：同步器在 `files.managedBaselines` 保存渲染后来源的 SHA-256，并用三方比较自动接收官方单边升级、保留用户单边修改，在双方都变化或来源未知时报告冲突而不覆盖。该映射由工具维护，不建议手工编辑。
 
 `ejected` 有两种常见用法：
 

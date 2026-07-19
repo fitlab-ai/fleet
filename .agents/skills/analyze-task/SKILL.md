@@ -209,7 +209,7 @@ tail .agents/workspace/active/{task-id}/task.md
 获取当前时间：
 
 ```bash
-date "+%Y-%m-%d %H:%M:%S%:z"
+date "+%Y-%m-%d %H:%M:%S%z" | sed 's/\([+-][0-9][0-9]\)\([0-9][0-9]\)$/\1:\2/'
 ```
 
 更新 `.agents/workspace/active/{task-id}/task.md`：
@@ -275,7 +275,7 @@ node .agents/scripts/validate-artifact.js gate analyze-task .agents/workspace/ac
 
 下一步 - 审查需求分析：
   - Claude Code / OpenCode：/review-analysis {task-ref}
-  - Gemini CLI：/agent-infra:review-analysis {task-ref}
+  - Gemini CLI：/fleet:review-analysis {task-ref}
   - Codex CLI：$review-analysis {task-ref}
 ```
 

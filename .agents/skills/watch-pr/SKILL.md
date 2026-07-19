@@ -67,7 +67,7 @@ description: >
 获取当前时间：
 
 ```bash
-date "+%Y-%m-%d %H:%M:%S%:z"
+date "+%Y-%m-%d %H:%M:%S%z" | sed 's/\([+-][0-9][0-9]\)\([0-9][0-9]\)$/\1:\2/'
 ```
 
 更新 `.agents/workspace/active/{task-id}/task.md`：
@@ -109,7 +109,7 @@ node .agents/scripts/validate-artifact.js gate watch-pr .agents/workspace/active
   ```
   下一步 - 完成并归档任务：
     - Claude Code / OpenCode：/complete-task {task-ref}
-    - Gemini CLI：/agent-infra:complete-task {task-ref}
+    - Gemini CLI：/fleet:complete-task {task-ref}
     - Codex CLI：$complete-task {task-ref}
   ```
 
