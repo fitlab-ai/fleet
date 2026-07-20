@@ -80,6 +80,101 @@ class GenerationStoreTests(unittest.TestCase):
 
 
 class RefreshPipelineTests(unittest.TestCase):
+    def test_download_negotiates_clash_meta_without_changing_request_contract(self):
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit):
+                return b"proxies: []\n"
+
+        opener = mock.Mock()
+        opener.open.return_value = Response()
+        url = "https://provider.example/subscription?token=test-token"
+
+        self.assertEqual(fleet.download_subscription(url, opener=opener, timeout=17),
+                         b"proxies: []\n")
+        request = opener.open.call_args.args[0]
+        self.assertEqual(request.full_url, url)
+        self.assertEqual(request.get_header("User-agent"), "clash.meta")
+        self.assertEqual(opener.open.call_args.kwargs["timeout"], 17)
+
+    def test_strict_parser_distinguishes_format_from_clash_structure(self):
+        cases = [
+            ('"dm1lc3M6Ly9leGFtcGxl"\n', "format"),
+            ('["vmess://example"]\n', "format"),
+            ('{"rules": []}\n', "structure"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "source.yaml"
+            path.write_text("ignored")
+            for parsed, category in cases:
+                with self.subTest(category=category, parsed=parsed):
+                    result = mock.Mock(returncode=0, stdout=parsed)
+                    with mock.patch.object(fleet.subprocess, "run", return_value=result):
+                        with self.assertRaises(fleet.SubscriptionError) as raised:
+                            fleet._parse_subscription_yaml_strict(path)
+                    self.assertEqual(raised.exception.category, category)
+                    self.assertNotIn("vmess://example", str(raised.exception))
+
+    def test_format_failure_is_safe_and_preserves_current_generation(self):
+        secrets = [
+            "https://provider.example/subscription?token=TOP-SECRET-TOKEN",
+            "TOP-SECRET-RESPONSE-vmess://credential",
+            "TOP-SECRET-NODE",
+        ]
+        backend = mock.Mock()
+        backend.get_url.return_value = secrets[0]
+
+        for force in (False, True):
+            with self.subTest(force=force), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "current.json").write_text(json.dumps({"generation": "old-generation"}))
+                out = io.StringIO()
+                error = fleet.SubscriptionError(
+                    "format",
+                    "Subscription response is not supported Clash YAML; check format negotiation",
+                )
+                with mock.patch.object(fleet, "download_subscription",
+                                       return_value=secrets[1].encode()), \
+                        mock.patch.object(fleet, "_parse_subscription_yaml_strict",
+                                          side_effect=error), \
+                        redirect_stdout(out):
+                    self.assertEqual(fleet.cmd_refresh(force, backend, root), 1)
+
+                self.assertEqual(json.loads((root / "current.json").read_text()),
+                                 {"generation": "old-generation"})
+                state = json.loads((root / "subscription-state.json").read_text())
+                self.assertEqual(state["last_error"], "format")
+                self.assertIn("check format negotiation", out.getvalue())
+                for secret in secrets:
+                    self.assertNotIn(secret, out.getvalue())
+                    self.assertNotIn(secret, (root / "subscription-state.json").read_text())
+
+    def test_process_publishes_thirty_vmess_and_four_hysteria2_nodes(self):
+        nodes = [vmess(f"v-{index}") for index in range(30)]
+        nodes.extend({"name": f"h-{index}", "type": "hysteria2",
+                      "server": "h.example", "port": 443, "password": "p"}
+                     for index in range(4))
+        store = mock.Mock()
+        store.load_nodes.return_value = []
+        store.publish.return_value = "new-generation"
+
+        with mock.patch.object(fleet, "_parse_subscription_yaml_strict",
+                               return_value={"proxies": nodes}):
+            generation, published, counts = fleet._process_subscription(
+                b"proxies: []\n", store, False, check_sing_box=False)
+
+        self.assertEqual(generation, "new-generation")
+        self.assertEqual(len(published), 34)
+        self.assertEqual(counts, {"vmess": 30, "hysteria2": 4, "anytls": 0})
+        store.publish.assert_called_once_with(b"proxies: []\n", nodes, counts)
+
     def test_process_validates_before_publishing(self):
         store = mock.Mock()
         store.load_nodes.return_value = [vmess("old")] * 10
