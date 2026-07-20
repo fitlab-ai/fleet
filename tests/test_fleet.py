@@ -25,6 +25,13 @@ def vmess(name="v"):
             "uuid": "00000000-0000-0000-0000-000000000001"}
 
 
+def trojan(name="t", **overrides):
+    node = {"name": name, "type": "trojan", "server": "trojan.example.com",
+            "port": 443, "password": "trojan-password"}
+    node.update(overrides)
+    return node
+
+
 class MemoryCredentials(fleet.CredentialBackend):
     def __init__(self):
         self.urls = {}
@@ -44,16 +51,48 @@ class MemoryCredentials(fleet.CredentialBackend):
 class NodeValidationTests(unittest.TestCase):
     def test_supported_protocols_and_counts(self):
         nodes = [vmess(), {"name": "h", "type": "hysteria2", "server": "h.example", "port": 443, "password": "p"},
-                 {"name": "a", "type": "anytls", "server": "a.example", "port": 8443, "password": "p"}]
+                 {"name": "a", "type": "anytls", "server": "a.example", "port": 8443, "password": "p"},
+                 trojan()]
         validated, counts = fleet.validate_nodes(nodes)
         self.assertEqual(validated, nodes)
-        self.assertEqual(counts, {"vmess": 1, "hysteria2": 1, "anytls": 1})
+        self.assertEqual(counts, {"vmess": 1, "hysteria2": 1, "anytls": 1,
+                                  "trojan": 1})
 
     def test_rejects_unknown_protocol_and_duplicate_names(self):
         with self.assertRaises(fleet.SubscriptionError):
-            fleet.validate_nodes([dict(vmess(), type="trojan")])
+            fleet.validate_nodes([dict(vmess(), type="shadowsocks")])
         with self.assertRaises(fleet.SubscriptionError):
             fleet.validate_nodes([vmess(), vmess()])
+
+    def test_trojan_rejects_invalid_tls_and_transport_fields(self):
+        invalid_nodes = [
+            trojan(password=""),
+            trojan(sni=""),
+            trojan(tls=False),
+            trojan(tls="true"),
+            trojan(alpn="h2"),
+            trojan(alpn=["h2", ""]),
+            trojan(alpn=[" "]),
+            trojan(network="ws"),
+            trojan(**{"ws-opts": {"path": "/"}}),
+            trojan(**{"grpc-opts": {"grpc-service-name": "service"}}),
+            trojan(**{"reality-opts": {"public-key": "key"}}),
+            trojan(**{"client-fingerprint": "chrome"}),
+        ]
+        for node in invalid_nodes:
+            with self.subTest(node=node):
+                with self.assertRaises(fleet.SubscriptionError) as raised:
+                    fleet.validate_nodes([node])
+                self.assertEqual(raised.exception.category, "node")
+                self.assertNotIn("trojan-password", str(raised.exception))
+
+    def test_trojan_accepts_tcp_tls_fields(self):
+        node = trojan(sni="sni.example.com", tls=True,
+                      alpn=["h2", "http/1.1"], network="tcp",
+                      **{"skip-cert-verify": True})
+        validated, counts = fleet.validate_nodes([node])
+        self.assertEqual(validated, [node])
+        self.assertEqual(counts["trojan"], 1)
 
     def test_quantity_guard(self):
         fleet.enforce_node_count(5, 10, False)
@@ -66,15 +105,39 @@ class GenerationStoreTests(unittest.TestCase):
     def test_publish_and_load(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = fleet.GenerationStore(Path(tmp))
-            store.publish(b"proxies: []\n", [vmess()], {"vmess": 1, "hysteria2": 0, "anytls": 0})
+            store.publish(b"proxies: []\n", [vmess()], fleet._protocol_counts([vmess()]))
             self.assertEqual(store.load_nodes(), [vmess()])
             self.assertEqual((Path(tmp) / "current.json").stat().st_mode & 0o777, 0o600)
+
+    def test_loads_legacy_manifest_without_trojan_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = fleet.GenerationStore(root)
+            generation = store.publish(
+                b"proxies: []\n", [vmess()], fleet._protocol_counts([vmess()]))
+            manifest_path = root / "generations" / generation / "manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest["protocol_counts"].pop("trojan", None)
+            manifest_path.write_text(json.dumps(manifest))
+            self.assertEqual(store.load_nodes(), [vmess()])
+
+    def test_rejects_manifest_with_unknown_nonzero_protocol(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = fleet.GenerationStore(root)
+            generation = store.publish(
+                b"proxies: []\n", [vmess()], fleet._protocol_counts([vmess()]))
+            manifest_path = root / "generations" / generation / "manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest["protocol_counts"]["future-protocol"] = 1
+            manifest_path.write_text(json.dumps(manifest))
+            self.assertEqual(store.load_nodes(), [])
 
     def test_corrupt_current_generation_falls_back(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = fleet.GenerationStore(Path(tmp))
-            store.publish(b"one", [vmess("old")], {"vmess": 1, "hysteria2": 0, "anytls": 0})
-            store.publish(b"two", [vmess("new")], {"vmess": 1, "hysteria2": 0, "anytls": 0})
+            store.publish(b"one", [vmess("old")], fleet._protocol_counts([vmess("old")]))
+            store.publish(b"two", [vmess("new")], fleet._protocol_counts([vmess("new")]))
             current = json.loads((Path(tmp) / "current.json").read_text())["generation"]
             (Path(tmp) / "generations" / current / "nodes.json").write_text("broken")
             self.assertEqual(store.load_nodes()[0]["name"], "old")
@@ -309,6 +372,24 @@ class MultiSubscriptionTests(unittest.TestCase):
             self.assertEqual([n["name"] for n in fleet.load_aggregated_nodes(
                 config_dir=root, warn=False)], ["healthy-node"])
 
+    def test_refresh_publishes_trojan_count_to_subscription_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backend = MemoryCredentials()
+            fleet.cmd_subscription_add(
+                "secondary", "https://secondary.example/sub", backend, root)
+            record = fleet.SubscriptionRegistry(root).records[0]
+            with mock.patch.object(fleet, "download_subscription", return_value=b"source"), \
+                    mock.patch.object(fleet, "_parse_subscription_yaml_strict",
+                                      return_value={"proxies": [trojan()]}), \
+                    mock.patch.object(fleet, "validate_with_sing_box"):
+                self.assertEqual(fleet.cmd_refresh(False, backend, root), 0)
+            state = json.loads((root / "subscriptions" / record["id"] / "state.json").read_text())
+            self.assertEqual(state["node_count"], 1)
+            self.assertEqual(state["protocol_counts"], {
+                "vmess": 0, "hysteria2": 0, "anytls": 0, "trojan": 1,
+            })
+
     def test_remove_rolls_registry_back_when_credential_delete_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -345,6 +426,28 @@ class KeychainCredentialTests(unittest.TestCase):
         accounts = [call.args[0][call.args[0].index("-a") + 1]
                     for call in runner.call_args_list]
         self.assertEqual(accounts, [f"{backend.username}:{one}", f"{backend.username}:{two}"])
+
+class OutboundConfigTests(unittest.TestCase):
+    def test_trojan_outbound_maps_tls_fields(self):
+        node = trojan(sni="sni.example.com", alpn=["h2", "http/1.1"],
+                      **{"skip-cert-verify": True})
+        outbound = fleet._build_outbound(node)
+        self.assertEqual(outbound, {
+            "tag": "proxy", "type": "trojan", "server": "trojan.example.com",
+            "server_port": 443, "password": "trojan-password",
+            "tls": {"enabled": True, "server_name": "sni.example.com",
+                    "insecure": True, "alpn": ["h2", "http/1.1"]},
+        })
+
+    def test_trojan_tls_defaults_and_proxy_tun_outbound_match(self):
+        node = trojan(alpn=[])
+        proxy_outbound = fleet.mk_proxy_config(node)["outbounds"][0]
+        tun_outbound = fleet.mk_tun_config(node)["outbounds"][0]
+        self.assertEqual(proxy_outbound, tun_outbound)
+        self.assertEqual(proxy_outbound["tls"], {
+            "enabled": True, "server_name": "trojan.example.com", "insecure": False,
+        })
+
 
 class RefreshPipelineTests(unittest.TestCase):
     def test_download_negotiates_clash_meta_without_changing_request_contract(self):
@@ -429,11 +532,12 @@ class RefreshPipelineTests(unittest.TestCase):
                     self.assertNotIn(secret, state_path.read_text())
                     self.assertNotIn(secret, (root / "subscriptions.json").read_text())
 
-    def test_process_publishes_thirty_vmess_and_four_hysteria2_nodes(self):
+    def test_process_publishes_mixed_nodes_including_trojan(self):
         nodes = [vmess(f"v-{index}") for index in range(30)]
         nodes.extend({"name": f"h-{index}", "type": "hysteria2",
                       "server": "h.example", "port": 443, "password": "p"}
                      for index in range(4))
+        nodes.append(trojan())
         store = mock.Mock()
         store.load_nodes.return_value = []
         store.publish.return_value = "new-generation"
@@ -444,8 +548,9 @@ class RefreshPipelineTests(unittest.TestCase):
                 b"proxies: []\n", store, False, check_sing_box=False)
 
         self.assertEqual(generation, "new-generation")
-        self.assertEqual(len(published), 34)
-        self.assertEqual(counts, {"vmess": 30, "hysteria2": 4, "anytls": 0})
+        self.assertEqual(len(published), 35)
+        self.assertEqual(counts, {"vmess": 30, "hysteria2": 4, "anytls": 0,
+                                  "trojan": 1})
         store.publish.assert_called_once_with(b"proxies: []\n", nodes, counts)
 
     def test_process_validates_before_publishing(self):
@@ -460,7 +565,8 @@ class RefreshPipelineTests(unittest.TestCase):
     def test_force_does_not_bypass_protocol_validation(self):
         store = mock.Mock()
         store.load_nodes.return_value = [vmess("old")] * 10
-        invalid = {"name": "bad", "type": "trojan", "server": "x", "port": 443}
+        invalid = {"name": "bad", "type": "shadowsocks", "server": "x", "port": 443,
+                   "password": "p"}
         with mock.patch.object(fleet, "_parse_subscription_yaml_strict", return_value={"proxies": [invalid]}):
             with self.assertRaises(fleet.SubscriptionError):
                 fleet._process_subscription(b"ignored", store, True, check_sing_box=False)

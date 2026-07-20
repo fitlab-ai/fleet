@@ -68,7 +68,14 @@ SUBSCRIPTION_TIMEOUT_SECONDS = _env_int("FLEET_SUBSCRIPTION_TIMEOUT", 30)
 SUBSCRIPTION_MAX_BYTES = 10 * 1024 * 1024
 KEYCHAIN_SERVICE = "fleet.subscription"
 SUBSCRIPTIONS_FILE = CONFIG_DIR / "subscriptions.json"
-SUPPORTED_PROTOCOLS = ("vmess", "hysteria2", "anytls")
+SUPPORTED_PROTOCOLS = ("vmess", "hysteria2", "anytls", "trojan")
+MIGRATION_BASELINE_COUNTS = {
+    "vmess": 29,
+    "hysteria2": 4,
+    "anytls": 11,
+    "trojan": 0,
+}
+MIGRATION_BASELINE_TOTAL = sum(MIGRATION_BASELINE_COUNTS.values())
 PROXY_HOST = "127.0.0.1"
 PROXY_PORT = _env_int("FLEET_PORT", 7890)
 TUN_ADDR = "172.19.0.1/30"
@@ -248,6 +255,22 @@ def _protocol_counts(nodes: List[Dict[str, Any]]) -> Dict[str, int]:
             for kind in SUPPORTED_PROTOCOLS}
 
 
+def _normalize_protocol_counts(value: Any) -> Optional[Dict[str, int]]:
+    """Normalize pre-protocol-extension manifests without hiding real data."""
+    if not isinstance(value, dict):
+        return None
+    normalized = {}
+    for kind in SUPPORTED_PROTOCOLS:
+        count = value.get(kind, 0)
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            return None
+        normalized[kind] = count
+    for kind, count in value.items():
+        if kind not in SUPPORTED_PROTOCOLS and count != 0:
+            return None
+    return normalized
+
+
 class GenerationStore:
     """Crash-safe immutable subscription generations with verified fallback."""
 
@@ -301,7 +324,10 @@ class GenerationStore:
             nodes = payload.get("nodes") if isinstance(payload, dict) else None
             if not isinstance(nodes, list) or len(nodes) != manifest.get("node_count"):
                 return None
-            if _protocol_counts(nodes) != manifest.get("protocol_counts"):
+            actual_counts = _protocol_counts(nodes)
+            manifest_counts = _normalize_protocol_counts(manifest.get("protocol_counts"))
+            if (sum(actual_counts.values()) != len(nodes)
+                    or actual_counts != manifest_counts):
                 return None
             return nodes, str(manifest.get("created_at", ""))
         except (OSError, ValueError, TypeError):
@@ -508,6 +534,22 @@ def validate_nodes(nodes: Any) -> tuple[List[Dict[str, Any]], Dict[str, int]]:
                 raise SubscriptionError("node", "ws-opts must be an object")
         if kind == "anytls" and "alpn" in node and (not isinstance(node["alpn"], list) or not all(isinstance(v, str) for v in node["alpn"])):
             raise SubscriptionError("node", "alpn must be a list of strings")
+        if kind == "trojan":
+            if "sni" in node and (not isinstance(node["sni"], str) or not node["sni"].strip()):
+                raise SubscriptionError("node", "Trojan sni must be a non-empty string")
+            if "tls" in node and node["tls"] is not True:
+                raise SubscriptionError("node", "Trojan tls must be enabled")
+            if "alpn" in node and (not isinstance(node["alpn"], list)
+                    or not all(isinstance(value, str) and value.strip()
+                               for value in node["alpn"])):
+                raise SubscriptionError("node", "Trojan alpn must be a list of non-empty strings")
+            if "network" in node and node["network"] != "tcp":
+                raise SubscriptionError("node", "Trojan only supports the tcp network")
+            unsupported = ("ws-opts", "grpc-opts", "http-opts", "h2-opts",
+                           "http-upgrade-opts", "reality-opts", "ech-opts",
+                           "client-fingerprint")
+            if any(field in node for field in unsupported):
+                raise SubscriptionError("node", "Trojan transport options are not supported")
         for field in ("up", "down"):
             if kind == "hysteria2" and field in node and (isinstance(node[field], bool) or not isinstance(node[field], (int, float)) or node[field] <= 0):
                 raise SubscriptionError("node", f"{field} must be positive")
@@ -645,6 +687,15 @@ def _build_outbound(node: Dict) -> Dict[str, Any]:
         if fingerprint:
             tls["utls"] = {"enabled": True, "fingerprint": fingerprint}
         outbound.update({"type": "anytls", "server": server, "server_port": port,
+                         "password": node.get("password", ""), "tls": tls})
+
+    elif node_type == "trojan":
+        tls = {"enabled": True,
+               "server_name": node.get("sni") or server,
+               "insecure": node.get("skip-cert-verify", False)}
+        if node.get("alpn"):
+            tls["alpn"] = node["alpn"]
+        outbound.update({"type": "trojan", "server": server, "server_port": port,
                          "password": node.get("password", ""), "tls": tls})
 
     else:
@@ -1507,7 +1558,8 @@ def _migrate_subscription(source_path: Path, url: Optional[str],
         if not target_url:
             raise SubscriptionError("credential", "Subscription URL could not be recovered; use --url")
         nodes, counts = validate_nodes(parsed["proxies"])
-        if len(nodes) != 44 or counts != {"vmess": 29, "hysteria2": 4, "anytls": 11}:
+        if (len(nodes) != MIGRATION_BASELINE_TOTAL
+                or counts != MIGRATION_BASELINE_COUNTS):
             raise SubscriptionError("migration", "Source does not match the 44-node migration baseline")
         validate_with_sing_box(nodes)
         registry = _ensure_registry_migrated(
@@ -1520,7 +1572,8 @@ def _migrate_subscription(source_path: Path, url: Optional[str],
             now = datetime.now(timezone.utc).isoformat()
             _write_record_state(config_dir, record["id"], {
                 "schema": 1, "last_attempt": now, "last_success": now,
-                "generation": generation, "node_count": 44, "protocol_counts": counts,
+                "generation": generation, "node_count": MIGRATION_BASELINE_TOTAL,
+                "protocol_counts": counts,
             })
             registry.save()
         except Exception:
@@ -1531,7 +1584,8 @@ def _migrate_subscription(source_path: Path, url: Optional[str],
             shutil.rmtree(_subscription_root(config_dir, record["id"]), ignore_errors=True)
             raise
         print(f"✓ Migrated {record['name']} ({record['id'][:8]}): "
-              "44 nodes (vmess: 29, hysteria2: 4, anytls: 11)")
+              f"{MIGRATION_BASELINE_TOTAL} nodes "
+              "(vmess: 29, hysteria2: 4, anytls: 11, trojan: 0)")
         return 0
     except (OSError, SubscriptionError) as exc:
         category = exc.category if isinstance(exc, SubscriptionError) else "migration"

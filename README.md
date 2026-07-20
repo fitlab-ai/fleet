@@ -72,8 +72,8 @@ recovered from the file:
 fleet subscription migrate --name legacy --url 'https://provider.example/subscription'
 ```
 
-The current migration check expects 44 nodes: 29 VMess, 4 Hysteria2, and 11
-AnyTLS. This distribution is not enforced for later refreshes.
+The current migration check expects 44 nodes: 29 VMess, 4 Hysteria2, 11
+AnyTLS, and 0 Trojan. This distribution is not enforced for later refreshes.
 
 ## Modes
 
@@ -121,9 +121,12 @@ safe `format` category; the response body, subscription URL, tokens, node names,
 servers, and credentials are not included in the error or refresh state.
 
 Refresh validates the HTTPS response, strict YAML structure, all node fields,
-supported protocols (VMess, Hysteria2, AnyTLS), node counts, and every generated
-proxy config with `sing-box check`. A refresh that shrinks below 50% of that
-subscription's previous successful count is rejected unless `--force` is
+supported protocols (VMess, Hysteria2, AnyTLS, Trojan), node counts, and every
+generated proxy config with `sing-box check`. Trojan support covers the basic
+TCP + TLS form with password, optional SNI, a boolean `skip-cert-verify`, and an
+optional ALPN string list. Trojan WebSocket, gRPC, and other transports are
+rejected instead of being silently ignored. A refresh that shrinks below 50% of
+that subscription's previous successful count is rejected unless `--force` is
 supplied. `--force` does not bypass format or any other validation.
 `fleet refresh NAME` refreshes one subscription; `fleet refresh` processes every
 active subscription and continues after an individual failure. Successful
@@ -137,9 +140,12 @@ needed:
 FLEET_SUBSCRIPTION_TIMEOUT=60 fleet refresh
 ```
 
-TLS certificate and hostname verification always remain enabled; there is no
-insecure mode. Refresh never starts, stops, or reloads sing-box and does not
-change the current system proxy, Fleet runtime state, or TUN route. Failed
+TLS certificate and hostname verification are enabled by default, and Fleet has
+no CLI option to bypass them. If a trusted subscription explicitly sets the
+boolean `skip-cert-verify: true` for Hysteria2, AnyTLS, or Trojan, Fleet maps it
+to sing-box `tls.insecure: true`; the subscription provider is therefore part of
+the security boundary. Refresh never starts, stops, or reloads sing-box and does
+not change the current system proxy, Fleet runtime state, or TUN route. Failed
 downloads, format negotiation, and validation leave the last usable cache
 untouched. Each subscription's `state.json` records only the safe `last_error`
 category, including `format` for unsupported top-level responses.
