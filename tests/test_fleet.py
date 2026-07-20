@@ -25,6 +25,22 @@ def vmess(name="v"):
             "uuid": "00000000-0000-0000-0000-000000000001"}
 
 
+class MemoryCredentials(fleet.CredentialBackend):
+    def __init__(self):
+        self.urls = {}
+
+    def set_url(self, subscription_id, url):
+        self.urls[subscription_id] = url
+
+    def get_url(self, subscription_id=None):
+        if subscription_id not in self.urls:
+            raise fleet.SubscriptionError("credential", "Subscription is not configured")
+        return self.urls[subscription_id]
+
+    def delete_url(self, subscription_id=None):
+        self.urls.pop(subscription_id, None)
+
+
 class NodeValidationTests(unittest.TestCase):
     def test_supported_protocols_and_counts(self):
         nodes = [vmess(), {"name": "h", "type": "hysteria2", "server": "h.example", "port": 443, "password": "p"},
@@ -78,6 +94,257 @@ class GenerationStoreTests(unittest.TestCase):
                 with fleet.RefreshLock(root):
                     self.fail("lock should not be acquired")
 
+    def test_composite_writer_lock_releases_legacy_when_writer_is_busy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            root.joinpath("writer.lock").write_text(str(__import__("os").getpid()))
+            with self.assertRaises(fleet.SubscriptionError):
+                with fleet.CompositeWriterLock(root):
+                    self.fail("lock should not be acquired")
+            self.assertFalse(root.joinpath("refresh.lock").exists())
+
+
+class SubscriptionRegistryTests(unittest.TestCase):
+    def test_names_are_case_insensitive_unique_and_removed_names_stay_reserved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = fleet.SubscriptionRegistry(Path(tmp))
+            first = registry.add("Airport")
+            registry.save()
+            with self.assertRaises(fleet.SubscriptionError):
+                registry.add("airport")
+            registry.mark_removed(first["id"])
+            registry.save()
+            self.assertEqual(registry.allocate_name(), "subscription-1")
+            registry.add("subscription-1")
+            self.assertEqual(registry.allocate_name(), "subscription-2")
+
+    def test_registry_rejects_secret_fields_and_does_not_overwrite_corruption(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "subscriptions.json"
+            path.write_text('{"schema":2,"revision":1,"subscriptions":[{"id":"bad","name":"x","status":"active","url":"https://secret"}]}')
+            with self.assertRaises(fleet.SubscriptionError):
+                fleet.SubscriptionRegistry(root)
+            self.assertIn("https://secret", path.read_text())
+
+    def test_removed_records_are_purged_and_names_can_be_reused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = fleet.SubscriptionRegistry(Path(tmp))
+            removed = registry.add("subscription-1")
+            registry.mark_removed(removed["id"])
+            registry.save()
+            purged = registry.purge_removed()
+            registry.save()
+            self.assertEqual([item["id"] for item in purged], [removed["id"]])
+            self.assertEqual(registry.allocate_name(), "subscription-1")
+
+
+class MultiSubscriptionTests(unittest.TestCase):
+    def _published(self, root, record, nodes):
+        store = fleet.GenerationStore(root / "subscriptions" / record["id"])
+        store.publish(b"proxies: []\n", nodes, fleet._protocol_counts(nodes))
+
+    def test_add_keeps_multiple_credentials_and_prints_stable_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backend = MemoryCredentials()
+            out = io.StringIO()
+            with redirect_stdout(out):
+                self.assertEqual(fleet.cmd_subscription_add(
+                    "airport-a", "https://a.example/sub?token=SECRET-A", backend, root), 0)
+                self.assertEqual(fleet.cmd_subscription_add(
+                    "airport-b", "https://b.example/sub?token=SECRET-B", backend, root), 0)
+            registry = fleet.SubscriptionRegistry(root)
+            self.assertEqual([r["name"] for r in registry.records], ["airport-a", "airport-b"])
+            self.assertEqual(len(backend.urls), 2)
+            self.assertNotIn("SECRET", (root / "subscriptions.json").read_text())
+            self.assertNotIn("SECRET", out.getvalue())
+            self.assertIn("ID:", out.getvalue())
+
+    def test_legacy_cache_without_credential_is_not_hidden_by_first_add(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "nodes.json").write_text(json.dumps({"nodes": [vmess("legacy")]}))
+            backend = MemoryCredentials()
+
+            self.assertEqual(fleet.cmd_subscription_add(
+                "new", "https://new.example/sub", backend, root), 1)
+
+            self.assertFalse((root / "subscriptions.json").exists())
+            self.assertEqual(fleet.GenerationStore(root).load_nodes(), [vmess("legacy")])
+
+    def test_explicit_migrate_first_preserves_credentialed_legacy_subscription(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backend = MemoryCredentials()
+            backend.urls[None] = "https://legacy.example/sub"
+            legacy_nodes = [vmess("legacy")]
+            fleet.GenerationStore(root).publish(
+                b"proxies: []\n", legacy_nodes, fleet._protocol_counts(legacy_nodes))
+
+            source = root / "flclash.yaml"
+            source.write_bytes(b"proxies: []\n")
+            nodes = [vmess(f"v-{index}") for index in range(29)]
+            nodes.extend({"name": f"h-{index}", "type": "hysteria2",
+                          "server": "h.example", "port": 443, "password": "p"}
+                         for index in range(4))
+            nodes.extend({"name": f"a-{index}", "type": "anytls",
+                          "server": "a.example", "port": 443, "password": "p"}
+                         for index in range(11))
+
+            with mock.patch.object(fleet, "_parse_subscription_yaml_strict",
+                                   return_value={"proxies": nodes}), \
+                    mock.patch.object(fleet, "validate_with_sing_box"):
+                self.assertEqual(fleet.cmd_subscription_migrate(
+                    source, "https://import.example/sub", backend, root), 0)
+
+            registry = fleet.SubscriptionRegistry(root)
+            self.assertEqual([record["name"] for record in registry.records],
+                             ["subscription-1", "subscription-2"])
+            self.assertEqual(fleet.load_aggregated_nodes(
+                config_dir=root, warn=False)[0]["name"], "legacy")
+
+    def test_migrate_reports_safe_subscription_error_detail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "flclash.yaml"
+            source.write_bytes(b"proxies: []\n")
+            out = io.StringIO()
+
+            with mock.patch.object(fleet, "_parse_subscription_yaml_strict",
+                                   return_value={"proxies": []}), redirect_stdout(out):
+                self.assertEqual(fleet.cmd_subscription_migrate(
+                    source, "http://invalid.example/sub", MemoryCredentials(), root), 1)
+
+            self.assertIn("A valid HTTPS subscription URL is required", out.getvalue())
+
+    def test_aggregation_preserves_order_source_and_duplicate_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = fleet.SubscriptionRegistry(root)
+            one = registry.add("one")
+            two = registry.add("two")
+            registry.save()
+            self._published(root, one, [vmess("same"), vmess("one-only")])
+            self._published(root, two, [vmess("same")])
+
+            nodes = fleet.load_aggregated_nodes(config_dir=root, warn=False)
+
+            self.assertEqual([node["name"] for node in nodes], ["same", "one-only", "same"])
+            self.assertEqual([node["_fleet"]["subscription_name"] for node in nodes],
+                             ["one", "one", "two"])
+            self.assertEqual(len({node["_fleet"]["node_key"] for node in nodes}), 3)
+            self.assertEqual(fleet._find_node(nodes, "@two/same"), nodes[2])
+            out = io.StringIO()
+            with redirect_stdout(out):
+                self.assertIsNone(fleet._find_node(nodes, "same"))
+            self.assertIn("@one/same", out.getvalue())
+            self.assertIn("@two/same", out.getvalue())
+
+    def test_remove_retains_marked_cache_until_refresh_purges_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backend = MemoryCredentials()
+            fleet.cmd_subscription_add("one", "https://one.example/sub", backend, root)
+            record = fleet.SubscriptionRegistry(root).records[0]
+            self._published(root, record, [vmess("cached")])
+
+            self.assertEqual(fleet.cmd_subscription_remove("one", backend, root), 0)
+            nodes = fleet.load_aggregated_nodes(config_dir=root, warn=False)
+            self.assertEqual(nodes[0]["_fleet"]["subscription_status"], "removed")
+            self.assertEqual(fleet.cmd_refresh(False, backend, root), 0)
+            self.assertEqual(fleet.load_aggregated_nodes(config_dir=root, warn=False), [])
+            self.assertFalse((root / "subscriptions" / record["id"]).exists())
+
+    def test_refresh_isolates_failure_and_preserves_failed_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backend = MemoryCredentials()
+            fleet.cmd_subscription_add("good", "https://good.example/sub", backend, root)
+            fleet.cmd_subscription_add("bad", "https://bad.example/sub", backend, root)
+            records = fleet.SubscriptionRegistry(root).records
+            self._published(root, records[1], [vmess("last-good")])
+
+            def download(url, **_kwargs):
+                if "bad.example" in url:
+                    raise fleet.SubscriptionError("download", "Download failed")
+                return b"good"
+
+            def process(_source, store, _force, check_sing_box=True):
+                nodes = [vmess("fresh")]
+                generation = store.publish(b"good", nodes, fleet._protocol_counts(nodes))
+                return generation, nodes, fleet._protocol_counts(nodes)
+
+            with mock.patch.object(fleet, "download_subscription", side_effect=download), \
+                    mock.patch.object(fleet, "_process_subscription", side_effect=process), \
+                    mock.patch.object(fleet, "_stop") as stop:
+                self.assertEqual(fleet.cmd_refresh(False, backend, root), 1)
+            stop.assert_not_called()
+            nodes = fleet.load_aggregated_nodes(config_dir=root, warn=False)
+            self.assertEqual([n["name"] for n in nodes], ["fresh", "last-good"])
+            bad_state = json.loads((root / "subscriptions" / records[1]["id"] / "state.json").read_text())
+            self.assertEqual(bad_state["last_error"], "download")
+
+    def test_refresh_isolates_per_subscription_disk_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backend = MemoryCredentials()
+            fleet.cmd_subscription_add("broken", "https://broken.example/sub", backend, root)
+            fleet.cmd_subscription_add("healthy", "https://healthy.example/sub", backend, root)
+            calls = []
+
+            def process(_source, store, _force, check_sing_box=True):
+                calls.append(store.root.name)
+                if len(calls) == 1:
+                    raise OSError("disk unavailable")
+                nodes = [vmess("healthy-node")]
+                generation = store.publish(b"ok", nodes, fleet._protocol_counts(nodes))
+                return generation, nodes, fleet._protocol_counts(nodes)
+
+            with mock.patch.object(fleet, "download_subscription", return_value=b"source"), \
+                    mock.patch.object(fleet, "_process_subscription", side_effect=process):
+                self.assertEqual(fleet.cmd_refresh(False, backend, root), 1)
+
+            self.assertEqual(len(calls), 2)
+            self.assertEqual([n["name"] for n in fleet.load_aggregated_nodes(
+                config_dir=root, warn=False)], ["healthy-node"])
+
+    def test_remove_rolls_registry_back_when_credential_delete_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backend = MemoryCredentials()
+            fleet.cmd_subscription_add("one", "https://one.example/sub", backend, root)
+            with mock.patch.object(backend, "delete_url",
+                                   side_effect=fleet.SubscriptionError("credential", "failed")):
+                self.assertEqual(fleet.cmd_subscription_remove("one", backend, root), 1)
+            self.assertEqual(fleet.SubscriptionRegistry(root).records[0]["status"], "active")
+
+    def test_ten_subscriptions_and_five_hundred_nodes_remain_distinct(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = fleet.SubscriptionRegistry(root)
+            for sub_index in range(10):
+                record = registry.add(f"sub-{sub_index}")
+                self._published(root, record, [vmess(f"node-{node_index}") for node_index in range(50)])
+            registry.save()
+            nodes = fleet.load_aggregated_nodes(config_dir=root, warn=False)
+            self.assertEqual(len(nodes), 500)
+            self.assertEqual(len({n["_fleet"]["node_key"] for n in nodes}), 500)
+
+
+class KeychainCredentialTests(unittest.TestCase):
+    def test_each_subscription_uses_a_distinct_keychain_account(self):
+        results = [mock.Mock(returncode=0, stdout="") for _ in range(2)]
+        runner = mock.Mock(side_effect=results)
+        backend = fleet.KeychainCredentialBackend(runner=runner)
+        one = "1" * 32
+        two = "2" * 32
+        with mock.patch.object(fleet.sys, "platform", "darwin"):
+            backend.set_url(one, "https://one.example/sub")
+            backend.set_url(two, "https://two.example/sub")
+        accounts = [call.args[0][call.args[0].index("-a") + 1]
+                    for call in runner.call_args_list]
+        self.assertEqual(accounts, [f"{backend.username}:{one}", f"{backend.username}:{two}"])
 
 class RefreshPipelineTests(unittest.TestCase):
     def test_download_negotiates_clash_meta_without_changing_request_contract(self):
@@ -149,12 +416,18 @@ class RefreshPipelineTests(unittest.TestCase):
 
                 self.assertEqual(json.loads((root / "current.json").read_text()),
                                  {"generation": "old-generation"})
-                state = json.loads((root / "subscription-state.json").read_text())
+                record = fleet.SubscriptionRegistry(root).records[0]
+                migrated_root = root / "subscriptions" / record["id"]
+                self.assertEqual(json.loads((migrated_root / "current.json").read_text()),
+                                 {"generation": "old-generation"})
+                state_path = migrated_root / "state.json"
+                state = json.loads(state_path.read_text())
                 self.assertEqual(state["last_error"], "format")
                 self.assertIn("check format negotiation", out.getvalue())
                 for secret in secrets:
                     self.assertNotIn(secret, out.getvalue())
-                    self.assertNotIn(secret, (root / "subscription-state.json").read_text())
+                    self.assertNotIn(secret, state_path.read_text())
+                    self.assertNotIn(secret, (root / "subscriptions.json").read_text())
 
     def test_process_publishes_thirty_vmess_and_four_hysteria2_nodes(self):
         nodes = [vmess(f"v-{index}") for index in range(30)]

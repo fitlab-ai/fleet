@@ -38,6 +38,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -66,6 +67,7 @@ SUBSCRIPTION_USER_AGENT = "clash.meta"
 SUBSCRIPTION_TIMEOUT_SECONDS = _env_int("FLEET_SUBSCRIPTION_TIMEOUT", 30)
 SUBSCRIPTION_MAX_BYTES = 10 * 1024 * 1024
 KEYCHAIN_SERVICE = "fleet.subscription"
+SUBSCRIPTIONS_FILE = CONFIG_DIR / "subscriptions.json"
 SUPPORTED_PROTOCOLS = ("vmess", "hysteria2", "anytls")
 PROXY_HOST = "127.0.0.1"
 PROXY_PORT = _env_int("FLEET_PORT", 7890)
@@ -79,6 +81,117 @@ class SubscriptionError(Exception):
     def __init__(self, category: str, message: str):
         super().__init__(message)
         self.category = category
+
+
+SUBSCRIPTION_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$")
+SUBSCRIPTION_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+class SubscriptionRegistry:
+    """Strict, non-secret registry for stable subscription identities."""
+
+    def __init__(self, config_dir: Path = CONFIG_DIR):
+        self.config_dir = Path(config_dir)
+        self.path = self.config_dir / "subscriptions.json"
+        self.revision = 0
+        self.records: List[Dict[str, Any]] = []
+        if self.path.exists():
+            self._load()
+
+    def _load(self) -> None:
+        try:
+            value = json.loads(self.path.read_text())
+        except (OSError, ValueError, TypeError):
+            raise SubscriptionError("registry", "Subscription registry is damaged")
+        if (not isinstance(value, dict) or value.get("schema") != 2
+                or isinstance(value.get("revision"), bool)
+                or not isinstance(value.get("revision"), int)
+                or value.get("revision", -1) < 0
+                or not isinstance(value.get("subscriptions"), list)):
+            raise SubscriptionError("registry", "Subscription registry has an unsupported schema")
+        names = set()
+        ids = set()
+        allowed = {"id", "name", "status", "created_at", "removed_at"}
+        records = []
+        for raw in value["subscriptions"]:
+            if not isinstance(raw, dict) or set(raw) - allowed:
+                raise SubscriptionError("registry", "Subscription registry contains unsafe fields")
+            subscription_id = raw.get("id")
+            name = raw.get("name")
+            status = raw.get("status")
+            created_at = raw.get("created_at")
+            if (not isinstance(subscription_id, str) or not SUBSCRIPTION_ID_RE.fullmatch(subscription_id)
+                    or not isinstance(name, str) or not SUBSCRIPTION_NAME_RE.fullmatch(name)
+                    or status not in ("active", "removed")
+                    or not isinstance(created_at, str)
+                    or (status == "removed" and not isinstance(raw.get("removed_at"), str))):
+                raise SubscriptionError("registry", "Subscription registry contains an invalid record")
+            folded = name.casefold()
+            if subscription_id in ids or folded in names:
+                raise SubscriptionError("registry", "Subscription registry contains duplicate identities")
+            ids.add(subscription_id)
+            names.add(folded)
+            records.append(dict(raw))
+        self.revision = value["revision"]
+        self.records = records
+
+    def save(self) -> None:
+        self.revision += 1
+        try:
+            _atomic_json(self.path, {"schema": 2, "revision": self.revision,
+                                     "subscriptions": self.records})
+        except Exception:
+            self.revision -= 1
+            raise
+
+    def allocate_name(self) -> str:
+        used = {record["name"].casefold() for record in self.records}
+        index = 1
+        while f"subscription-{index}" in used:
+            index += 1
+        return f"subscription-{index}"
+
+    def add(self, name: Optional[str] = None) -> Dict[str, Any]:
+        name = name or self.allocate_name()
+        if not SUBSCRIPTION_NAME_RE.fullmatch(name) or "/" in name:
+            raise SubscriptionError("registry", "Subscription name must use 1-32 letters, digits, '.', '_' or '-'")
+        if any(record["name"].casefold() == name.casefold() for record in self.records):
+            raise SubscriptionError("registry", "Subscription name is already in use")
+        record = {"id": uuid.uuid4().hex, "name": name, "status": "active",
+                  "created_at": datetime.now(timezone.utc).isoformat()}
+        self.records.append(record)
+        return record
+
+    def resolve(self, selector: str, active_only: bool = False) -> Dict[str, Any]:
+        if not selector:
+            raise SubscriptionError("selector", "Subscription selector is required")
+        folded = selector.casefold()
+        matches = [record for record in self.records
+                   if record["name"].casefold() == folded
+                   or record["id"] == selector
+                   or record["id"].startswith(selector.lower())]
+        if active_only:
+            matches = [record for record in matches if record["status"] == "active"]
+        if len(matches) != 1:
+            message = "Subscription was not found" if not matches else "Subscription selector is ambiguous"
+            raise SubscriptionError("selector", message)
+        return matches[0]
+
+    def mark_removed(self, selector: str) -> Dict[str, Any]:
+        record = self.resolve(selector, active_only=True)
+        record["status"] = "removed"
+        record["removed_at"] = datetime.now(timezone.utc).isoformat()
+        return record
+
+    def restore_active(self, subscription_id: str) -> None:
+        record = self.resolve(subscription_id)
+        record["status"] = "active"
+        record.pop("removed_at", None)
+
+    def purge_removed(self) -> List[Dict[str, Any]]:
+        removed = [record for record in self.records if record["status"] == "removed"]
+        self.records = [record for record in self.records if record["status"] == "active"]
+        return removed
 
 
 def _secure_mkdir(path: Path) -> None:
@@ -143,6 +256,7 @@ class GenerationStore:
         self.generations = self.root / "generations"
         self.current = self.root / "current.json"
         self.legacy = self.root / "nodes.json"
+        self.last_load_fallback = False
 
     def publish(self, source: bytes, nodes: List[Dict[str, Any]], counts: Dict[str, int]) -> str:
         _secure_mkdir(self.root)
@@ -194,6 +308,7 @@ class GenerationStore:
             return None
 
     def load_nodes(self, warn: bool = False) -> List[Dict[str, Any]]:
+        self.last_load_fallback = False
         current_name = ""
         try:
             pointer = json.loads(self.current.read_text())
@@ -213,6 +328,7 @@ class GenerationStore:
                     if valid:
                         candidates.append((valid[1], path.name, valid[0]))
         if candidates:
+            self.last_load_fallback = True
             if warn:
                 print("Warning: current cache failed integrity checks; using previous valid cache")
             return max(candidates, key=lambda item: (item[0], item[1]))[2]
@@ -220,6 +336,7 @@ class GenerationStore:
             payload = json.loads(self.legacy.read_text())
             nodes = payload.get("nodes") if isinstance(payload, dict) else None
             if isinstance(nodes, list):
+                self.last_load_fallback = True
                 if warn:
                     print("Warning: using legacy node cache")
                 return nodes
@@ -240,9 +357,9 @@ class GenerationStore:
                 shutil.rmtree(path, ignore_errors=True)
 
 
-class RefreshLock:
-    def __init__(self, root: Path):
-        self.path = Path(root) / "refresh.lock"
+class _PidFileLock:
+    def __init__(self, path: Path):
+        self.path = Path(path)
 
     def __enter__(self):
         _secure_mkdir(self.path.parent)
@@ -256,7 +373,7 @@ class RefreshLock:
                 self.path.unlink(missing_ok=True)
                 fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             else:
-                raise SubscriptionError("lock", "Another subscription refresh is running")
+                raise SubscriptionError("lock", "Another Fleet write operation is running")
         with os.fdopen(fd, "w") as handle:
             handle.write(str(os.getpid()))
         return self
@@ -265,19 +382,50 @@ class RefreshLock:
         self.path.unlink(missing_ok=True)
 
 
-class CredentialBackend:
-    def set_url(self, url: str) -> None:
-        raise NotImplementedError
+class RefreshLock(_PidFileLock):
+    """Legacy single lock retained for old callers and transition tests."""
 
-    def get_url(self) -> str:
-        raise NotImplementedError
+    def __init__(self, root: Path):
+        super().__init__(Path(root) / "refresh.lock")
 
-    def delete_url(self) -> None:
-        raise NotImplementedError
 
-    def is_configured(self) -> bool:
+class CompositeWriterLock:
+    """Coordinate new writers with both legacy and current Fleet releases."""
+
+    def __init__(self, root: Path):
+        root = Path(root)
+        self.legacy = _PidFileLock(root / "refresh.lock")
+        self.writer = _PidFileLock(root / "writer.lock")
+
+    def __enter__(self):
+        self.legacy.__enter__()
         try:
-            return bool(self.get_url())
+            self.writer.__enter__()
+        except BaseException:
+            self.legacy.__exit__(None, None, None)
+            raise
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            self.writer.__exit__(exc_type, exc, tb)
+        finally:
+            self.legacy.__exit__(exc_type, exc, tb)
+
+
+class CredentialBackend:
+    def set_url(self, subscription_id: Optional[str], url: str) -> None:
+        raise NotImplementedError
+
+    def get_url(self, subscription_id: Optional[str] = None) -> str:
+        raise NotImplementedError
+
+    def delete_url(self, subscription_id: Optional[str] = None) -> None:
+        raise NotImplementedError
+
+    def is_configured(self, subscription_id: Optional[str] = None) -> bool:
+        try:
+            return bool(self.get_url(subscription_id))
         except SubscriptionError:
             return False
 
@@ -285,7 +433,14 @@ class CredentialBackend:
 class KeychainCredentialBackend(CredentialBackend):
     def __init__(self, runner=subprocess.run):
         self.runner = runner
-        self.account = getpass.getuser()
+        self.username = getpass.getuser()
+
+    def _account(self, subscription_id: Optional[str]) -> str:
+        if subscription_id is None:
+            return self.username
+        if not SUBSCRIPTION_ID_RE.fullmatch(subscription_id):
+            raise SubscriptionError("credential", "Invalid subscription identity")
+        return f"{self.username}:{subscription_id}"
 
     def _run(self, args: List[str], input_text: Optional[str] = None, check: bool = True):
         if sys.platform != "darwin":
@@ -296,20 +451,22 @@ class KeychainCredentialBackend(CredentialBackend):
             raise SubscriptionError("credential", "Keychain operation failed")
         return result
 
-    def set_url(self, url: str) -> None:
+    def set_url(self, subscription_id: Optional[str], url: str) -> None:
         self._run(["add-generic-password", "-U", "-s", KEYCHAIN_SERVICE,
-                   "-a", self.account, "-w", url])
+                   "-a", self._account(subscription_id), "-w", url])
 
-    def get_url(self) -> str:
+    def get_url(self, subscription_id: Optional[str] = None) -> str:
         result = self._run(["find-generic-password", "-s", KEYCHAIN_SERVICE,
-                            "-a", self.account, "-w"], check=False)
+                            "-a", self._account(subscription_id), "-w"], check=False)
         if result.returncode != 0 or not result.stdout.strip():
             raise SubscriptionError("credential", "Subscription is not configured")
         return result.stdout.strip()
 
-    def delete_url(self) -> None:
-        self._run(["delete-generic-password", "-s", KEYCHAIN_SERVICE,
-                   "-a", self.account], check=False)
+    def delete_url(self, subscription_id: Optional[str] = None) -> None:
+        result = self._run(["delete-generic-password", "-s", KEYCHAIN_SERVICE,
+                            "-a", self._account(subscription_id)], check=False)
+        if result.returncode not in (0, 44):
+            raise SubscriptionError("credential", "Keychain operation failed")
 
 
 def validate_subscription_url(url: str) -> str:
@@ -792,9 +949,19 @@ def _find_singbox() -> Optional[int]:
     return None
 
 
-def _save_state(mode: str, node_name: str, system_proxy_before: Optional[Dict[str, Any]] = None):
+def _save_state(mode: str, node: Any, system_proxy_before: Optional[Dict[str, Any]] = None):
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    state = {"mode": mode, "node": node_name, "pid": _find_singbox(), "port": PROXY_PORT}
+    if isinstance(node, dict):
+        metadata = node.get("_fleet", {})
+        node_name = node.get("name", "")
+        state = {"mode": mode, "node": node_name, "node_name": node_name,
+                 "node_key": metadata.get("node_key", node_name),
+                 "subscription_id": metadata.get("subscription_id"),
+                 "subscription_name": metadata.get("subscription_name"),
+                 "pid": _find_singbox(), "port": PROXY_PORT}
+    else:
+        state = {"mode": mode, "node": str(node), "node_name": str(node),
+                 "node_key": str(node), "pid": _find_singbox(), "port": PROXY_PORT}
     if system_proxy_before is not None:
         state["system_proxy_before"] = system_proxy_before
     STATE_FILE.write_text(json.dumps(state, indent=2))
@@ -919,7 +1086,7 @@ def _start(node: Dict, mode: str, system_proxy_before: Optional[Dict[str, Any]] 
     if pid:
         if mode == "proxy":
             _enable_system_proxies()
-        _save_state(mode, node["name"], system_proxy_before)
+        _save_state(mode, node, system_proxy_before)
         return True
     return False
 
@@ -930,15 +1097,19 @@ def _start(node: Dict, mode: str, system_proxy_before: Optional[Dict[str, Any]] 
 
 def cmd_list(nodes: List[Dict]):
     state = _load_state()
-    current = state["node"] if state else None
+    current = state.get("node_key", state.get("node")) if state else None
     mode = state.get("mode", "") if state else ""
 
-    header = f"{'':4s} {'NODE':38s} {'TYPE':10s} {'SERVER'}"
+    header = f"{'':4s} {'NODE':30s} {'SOURCE':20s} {'STATE':8s} {'TYPE':10s} {'SERVER'}"
     print(header)
     print("-" * 80)
     for i, node in enumerate(nodes):
-        marker = "→" if node["name"] == current else " "
-        print(f"{marker} {i:2d} {node['name']:38s} {node.get('type','vmess'):10s} {node.get('server','?'):30s}")
+        metadata = node.get("_fleet", {})
+        marker = "→" if metadata.get("node_key", node["name"]) == current else " "
+        source = metadata.get("subscription_name", "legacy")
+        status = metadata.get("subscription_status", "active")
+        print(f"{marker} {i:2d} {node['name']:30s} {source:20s} {status:8s} "
+              f"{node.get('type','vmess'):10s} {node.get('server','?'):30s}")
     print("-" * 80)
     print(f"Total: {len(nodes)} nodes")
     if state:
@@ -1047,6 +1218,116 @@ def _write_subscription_state(value: Dict[str, Any], config_dir: Path = CONFIG_D
     _atomic_json(config_dir / "subscription-state.json", value)
 
 
+def _subscription_root(config_dir: Path, subscription_id: str) -> Path:
+    if not SUBSCRIPTION_ID_RE.fullmatch(subscription_id):
+        raise SubscriptionError("registry", "Invalid subscription identity")
+    return Path(config_dir) / "subscriptions" / subscription_id
+
+
+def _read_record_state(config_dir: Path, subscription_id: str) -> Dict[str, Any]:
+    try:
+        value = json.loads((_subscription_root(config_dir, subscription_id) / "state.json").read_text())
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _write_record_state(config_dir: Path, subscription_id: str,
+                        value: Dict[str, Any]) -> None:
+    safe = {key: item for key, item in value.items()
+            if key in {"schema", "last_attempt", "last_success", "last_error",
+                       "generation", "node_count", "protocol_counts"}}
+    _atomic_json(_subscription_root(config_dir, subscription_id) / "state.json", safe)
+
+
+def _legacy_store_exists(config_dir: Path) -> bool:
+    root = Path(config_dir)
+    return any((root / name).exists() for name in
+               ("current.json", "nodes.json", "generations", "subscription-state.json"))
+
+
+def _copy_legacy_store(config_dir: Path, target: Path) -> None:
+    _secure_mkdir(target)
+    for name in ("current.json", "nodes.json"):
+        source = Path(config_dir) / name
+        if source.exists():
+            _secure_write(target / name, source.read_bytes())
+    source_generations = Path(config_dir) / "generations"
+    if source_generations.exists():
+        shutil.copytree(source_generations, target / "generations")
+    legacy_state = _read_subscription_state(Path(config_dir))
+    if legacy_state:
+        _write_record_state(Path(config_dir), target.name, legacy_state)
+
+
+def _ensure_registry_migrated(backend: CredentialBackend, config_dir: Path,
+                              name: Optional[str] = None,
+                              allow_uncredentialed_legacy: bool = False) -> SubscriptionRegistry:
+    """Migrate legacy identity/cache once, committing the registry last."""
+    config_dir = Path(config_dir)
+    if (config_dir / "subscriptions.json").exists():
+        return SubscriptionRegistry(config_dir)
+    registry = SubscriptionRegistry(config_dir)
+    try:
+        legacy_url = backend.get_url(None)
+    except SubscriptionError:
+        legacy_url = None
+    if not legacy_url:
+        if _legacy_store_exists(config_dir):
+            if allow_uncredentialed_legacy:
+                return registry
+            raise SubscriptionError(
+                "migration",
+                "Legacy cache has no credential; run 'fleet subscription migrate --url URL'",
+            )
+        return registry
+    record = registry.add(name)
+    target = _subscription_root(config_dir, record["id"])
+    credential_created = False
+    try:
+        backend.set_url(record["id"], validate_subscription_url(legacy_url))
+        credential_created = True
+        if _legacy_store_exists(config_dir):
+            _copy_legacy_store(config_dir, target)
+        registry.save()
+        return registry
+    except Exception:
+        if credential_created:
+            try:
+                backend.delete_url(record["id"])
+            except Exception:
+                pass
+        if target.exists():
+            shutil.rmtree(target, ignore_errors=True)
+        raise
+
+
+def load_aggregated_nodes(registry: Optional[SubscriptionRegistry] = None,
+                          config_dir: Path = CONFIG_DIR,
+                          warn: bool = True) -> List[Dict[str, Any]]:
+    registry = registry or SubscriptionRegistry(config_dir)
+    result = []
+    for record in registry.records:
+        store = GenerationStore(_subscription_root(config_dir, record["id"]))
+        nodes = store.load_nodes(warn=False)
+        if store.last_load_fallback and warn:
+            print(f"Warning: {record['name']} current cache is damaged; using a fallback cache")
+        if not nodes and warn:
+            print(f"Warning: no usable cache for subscription {record['name']}")
+        for source in nodes:
+            if not isinstance(source, dict):
+                continue
+            node = dict(source)
+            node["_fleet"] = {
+                "subscription_id": record["id"],
+                "subscription_name": record["name"],
+                "subscription_status": record["status"],
+                "node_key": f"{record['id']}:{node.get('name', '')}",
+            }
+            result.append(node)
+    return result
+
+
 def _process_subscription(source: bytes, store: GenerationStore, force: bool,
                           check_sing_box=True) -> tuple:
     with tempfile.TemporaryDirectory(prefix="fleet-subscription-") as tmp:
@@ -1063,74 +1344,142 @@ def _process_subscription(source: bytes, store: GenerationStore, force: bool,
 
 
 def cmd_refresh(force: bool = False, backend: Optional[CredentialBackend] = None,
-                config_dir: Path = CONFIG_DIR) -> int:
+                config_dir: Path = CONFIG_DIR, selector: Optional[str] = None) -> int:
     backend = backend or KeychainCredentialBackend()
-    store = GenerationStore(config_dir)
-    attempted = datetime.now(timezone.utc).isoformat()
+    failures = 0
+    successes = 0
     try:
-        with RefreshLock(config_dir):
-            source = download_subscription(backend.get_url())
-            generation, nodes, counts = _process_subscription(source, store, force)
-        _write_subscription_state({"schema": 1, "configured": True,
-                                   "last_attempt": attempted, "last_success": attempted,
-                                   "generation": generation, "node_count": len(nodes),
-                                   "protocol_counts": counts}, config_dir)
-        print(f"✓ Refreshed {len(nodes)} nodes " + ", ".join(f"{k}: {v}" for k, v in counts.items()))
-        return 0
-    except SubscriptionError as exc:
-        state = _read_subscription_state(config_dir)
-        state.update({"schema": 1, "last_attempt": attempted,
-                      "last_error": exc.category})
-        try:
-            _write_subscription_state(state, config_dir)
-        except OSError:
-            pass
-        print(f"Refresh failed [{exc.category}]: {exc}")
+        with CompositeWriterLock(config_dir):
+            registry = _ensure_registry_migrated(backend, config_dir)
+            if selector:
+                targets = [registry.resolve(selector, active_only=True)]
+            else:
+                targets = [record for record in registry.records if record["status"] == "active"]
+            for record in targets:
+                attempted = datetime.now(timezone.utc).isoformat()
+                try:
+                    source = download_subscription(backend.get_url(record["id"]))
+                    store = GenerationStore(_subscription_root(config_dir, record["id"]))
+                    generation, nodes, counts = _process_subscription(source, store, force)
+                    _write_record_state(config_dir, record["id"], {
+                        "schema": 1, "last_attempt": attempted, "last_success": attempted,
+                        "generation": generation, "node_count": len(nodes),
+                        "protocol_counts": counts,
+                    })
+                    successes += 1
+                    print(f"✓ {record['name']}: refreshed {len(nodes)} nodes")
+                except (OSError, SubscriptionError) as exc:
+                    category = exc.category if isinstance(exc, SubscriptionError) else "cache"
+                    state = _read_record_state(config_dir, record["id"])
+                    state.update({"schema": 1, "last_attempt": attempted,
+                                  "last_error": category})
+                    try:
+                        _write_record_state(config_dir, record["id"], state)
+                    except OSError:
+                        pass
+                    failures += 1
+                    message = str(exc) if isinstance(exc, SubscriptionError) else "local cache operation failed"
+                    print(f"✗ {record['name']} [{category}]: {message}")
+            removed = registry.purge_removed()
+            if removed:
+                registry.save()
+                for record in removed:
+                    shutil.rmtree(_subscription_root(config_dir, record["id"]), ignore_errors=True)
+                    try:
+                        backend.delete_url(record["id"])
+                    except SubscriptionError:
+                        pass
+            elif not registry.path.exists():
+                registry.save()
+        print(f"Refresh complete: {successes} succeeded, {failures} failed")
+        return 1 if failures else 0
+    except (OSError, SubscriptionError) as exc:
+        category = exc.category if isinstance(exc, SubscriptionError) else "registry"
+        print(f"Refresh failed [{category}]: {exc}")
         return 1
 
 
-def cmd_subscription_add(url: Optional[str], backend: Optional[CredentialBackend] = None) -> int:
+def cmd_subscription_add(name: Optional[str] = None, url: Optional[str] = None,
+                         backend: Optional[CredentialBackend] = None,
+                         config_dir: Path = CONFIG_DIR) -> int:
     backend = backend or KeychainCredentialBackend()
+    if name and url is None and name.strip().lower().startswith("https://"):
+        url, name = name, None
     if not url:
         url = sys.stdin.readline().strip()
     try:
-        backend.set_url(validate_subscription_url(url or ""))
-        print("✓ Subscription configured")
+        validated = validate_subscription_url(url or "")
+        with CompositeWriterLock(config_dir):
+            registry = _ensure_registry_migrated(backend, config_dir)
+            record = registry.add(name)
+            backend.set_url(record["id"], validated)
+            try:
+                registry.save()
+            except Exception:
+                try:
+                    backend.delete_url(record["id"])
+                except Exception:
+                    pass
+                raise
+        print(f"✓ Subscription added: {record['name']} (ID: {record['id'][:8]})")
         return 0
-    except SubscriptionError as exc:
-        print(f"Subscription add failed [{exc.category}]: {exc}")
+    except (OSError, SubscriptionError) as exc:
+        category = exc.category if isinstance(exc, SubscriptionError) else "registry"
+        print(f"Subscription add failed [{category}]: {exc}")
         return 1
 
 
-def cmd_subscription_status(backend: Optional[CredentialBackend] = None,
-                            config_dir: Path = CONFIG_DIR) -> int:
-    backend = backend or KeychainCredentialBackend()
-    configured = backend.is_configured()
-    state = _read_subscription_state(config_dir)
-    print(f"Configured: {'yes' if configured else 'no'}")
-    if state.get("last_success"):
-        print(f"Last success: {state['last_success']}")
-    if state.get("last_error"):
-        print(f"Last error: {state['last_error']}")
-    if "node_count" in state:
-        print(f"Nodes: {state['node_count']}")
-        counts = state.get("protocol_counts", {})
-        print("Protocols: " + ", ".join(f"{k}={counts.get(k, 0)}" for k in SUPPORTED_PROTOCOLS))
-    return 0
-
-
-def cmd_subscription_remove(backend: Optional[CredentialBackend] = None,
+def cmd_subscription_status(selector: Optional[str] = None,
+                            backend: Optional[CredentialBackend] = None,
                             config_dir: Path = CONFIG_DIR) -> int:
     backend = backend or KeychainCredentialBackend()
     try:
-        backend.delete_url()
-        state = config_dir / "subscription-state.json"
-        if state.exists():
-            state.unlink()
-        print("✓ Subscription removed; cached nodes retained")
+        if not (Path(config_dir) / "subscriptions.json").exists():
+            configured = backend.is_configured(None)
+            print(f"Configured: {'yes' if configured else 'no'}")
+            return 0
+        registry = SubscriptionRegistry(config_dir)
+        records = [registry.resolve(selector)] if selector else registry.records
+        if not selector:
+            active = sum(record["status"] == "active" for record in records)
+            print(f"Subscriptions: {len(records)} ({active} active)")
+        for record in records:
+            state = _read_record_state(config_dir, record["id"])
+            configured = (record["status"] == "active"
+                          and backend.is_configured(record["id"]))
+            print(f"{record['name']} ({record['id'][:8]}): {record['status']}, "
+                  f"credential={'yes' if configured else 'no'}, nodes={state.get('node_count', 0)}")
+            if state.get("last_success"):
+                print(f"  Last success: {state['last_success']}")
+            if state.get("last_error"):
+                print(f"  Last error: {state['last_error']}")
         return 0
     except SubscriptionError as exc:
-        print(f"Subscription remove failed [{exc.category}]: {exc}")
+        print(f"Subscription status failed [{exc.category}]: {exc}")
+        return 1
+
+
+def cmd_subscription_remove(selector: Optional[str] = None,
+                            backend: Optional[CredentialBackend] = None,
+                            config_dir: Path = CONFIG_DIR) -> int:
+    backend = backend or KeychainCredentialBackend()
+    try:
+        with CompositeWriterLock(config_dir):
+            registry = _ensure_registry_migrated(backend, config_dir)
+            record = registry.mark_removed(selector or "")
+            registry.save()
+            try:
+                backend.delete_url(record["id"])
+            except SubscriptionError:
+                registry.restore_active(record["id"])
+                registry.save()
+                raise
+        print(f"✓ Subscription removed: {record['name']}; cached nodes retained [removed]")
+        print("Removal cannot be undone; run fleet refresh to purge, then add the subscription again.")
+        return 0
+    except (OSError, SubscriptionError) as exc:
+        category = exc.category if isinstance(exc, SubscriptionError) else "registry"
+        print(f"Subscription remove failed [{category}]: {exc}")
         return 1
 
 
@@ -1146,7 +1495,8 @@ def _recover_subscription_url(config: Dict[str, Any]) -> Optional[str]:
 
 
 def _migrate_subscription(source_path: Path, url: Optional[str],
-                          backend: CredentialBackend, config_dir: Path) -> int:
+                          backend: CredentialBackend, config_dir: Path,
+                          name: Optional[str] = None) -> int:
     try:
         source = source_path.read_bytes()
         with tempfile.TemporaryDirectory(prefix="fleet-migrate-") as tmp:
@@ -1160,39 +1510,44 @@ def _migrate_subscription(source_path: Path, url: Optional[str],
         if len(nodes) != 44 or counts != {"vmess": 29, "hysteria2": 4, "anytls": 11}:
             raise SubscriptionError("migration", "Source does not match the 44-node migration baseline")
         validate_with_sing_box(nodes)
-        old_url = None
+        registry = _ensure_registry_migrated(
+            backend, config_dir, allow_uncredentialed_legacy=True)
+        record = registry.add(name)
+        backend.set_url(record["id"], target_url)
         try:
-            old_url = backend.get_url()
-        except SubscriptionError:
-            pass
-        backend.set_url(target_url)
-        try:
-            generation = GenerationStore(config_dir).publish(source, nodes, counts)
+            generation = GenerationStore(_subscription_root(config_dir, record["id"])).publish(
+                source, nodes, counts)
+            now = datetime.now(timezone.utc).isoformat()
+            _write_record_state(config_dir, record["id"], {
+                "schema": 1, "last_attempt": now, "last_success": now,
+                "generation": generation, "node_count": 44, "protocol_counts": counts,
+            })
+            registry.save()
         except Exception:
-            if old_url:
-                backend.set_url(old_url)
-            else:
-                backend.delete_url()
+            try:
+                backend.delete_url(record["id"])
+            except Exception:
+                pass
+            shutil.rmtree(_subscription_root(config_dir, record["id"]), ignore_errors=True)
             raise
-        now = datetime.now(timezone.utc).isoformat()
-        _write_subscription_state({"schema": 1, "configured": True, "last_attempt": now,
-                                   "last_success": now, "generation": generation,
-                                   "node_count": 44, "protocol_counts": counts}, config_dir)
-        print("✓ Migrated 44 nodes (vmess: 29, hysteria2: 4, anytls: 11)")
+        print(f"✓ Migrated {record['name']} ({record['id'][:8]}): "
+              "44 nodes (vmess: 29, hysteria2: 4, anytls: 11)")
         return 0
     except (OSError, SubscriptionError) as exc:
         category = exc.category if isinstance(exc, SubscriptionError) else "migration"
-        print(f"Migration failed [{category}]: source could not be imported")
+        message = str(exc) if isinstance(exc, SubscriptionError) else "source could not be imported"
+        print(f"Migration failed [{category}]: {message}")
         return 1
 
 
 def cmd_subscription_migrate(source_path: Path = CLASH_CONFIG, url: Optional[str] = None,
                              backend: Optional[CredentialBackend] = None,
-                             config_dir: Path = CONFIG_DIR) -> int:
+                             config_dir: Path = CONFIG_DIR,
+                             name: Optional[str] = None) -> int:
     backend = backend or KeychainCredentialBackend()
     try:
-        with RefreshLock(config_dir):
-            return _migrate_subscription(source_path, url, backend, config_dir)
+        with CompositeWriterLock(config_dir):
+            return _migrate_subscription(source_path, url, backend, config_dir, name)
     except SubscriptionError as exc:
         print(f"Migration failed [{exc.category}]: source could not be imported")
         return 1
@@ -1211,15 +1566,16 @@ def cmd_ping(nodes: List[Dict], target: Optional[str] = None):
         targets = [n]
 
     def _tcp_latency(node: Dict) -> tuple:
+        key = node.get("_fleet", {}).get("node_key", node["name"])
         server = node.get("server", "")
         port = node.get("port", 443)
         try:
             t0 = time.monotonic()
             with sock_mod.create_connection((server, port), timeout=5):
                 elapsed = (time.monotonic() - t0) * 1000
-            return (node["name"], elapsed)
+            return (key, elapsed)
         except Exception:
-            return (node["name"], None)
+            return (key, None)
 
     print(f"Testing TCP latency to {len(targets)} node(s)...")
     print(f"{'':4s} {'NODE':38s} {'LATENCY':>10s}")
@@ -1233,14 +1589,18 @@ def cmd_ping(nodes: List[Dict], target: Optional[str] = None):
             results.append((name, ms))
 
     # Preserve original order
-    order = {n["name"]: i for i, n in enumerate(nodes) if n["name"] in {r[0] for r in results}}
+    order = {n.get("_fleet", {}).get("node_key", n["name"]): i
+             for i, n in enumerate(nodes)}
     results.sort(key=lambda r: order.get(r[0], 999))
 
     state = _load_state()
-    current = state["node"] if state else None
+    current = state.get("node_key", state.get("node")) if state else None
+    labels = {n.get("_fleet", {}).get("node_key", n["name"]): n["name"]
+              for n in nodes}
 
-    for name, ms in results:
-        marker = "→" if name == current else " "
+    for key, ms in results:
+        name = labels.get(key, key)
+        marker = "→" if key == current else " "
         if ms is not None:
             bar = _latency_bar(ms)
             print(f"{marker}  {name:38s} {ms:7.0f}ms {bar}")
@@ -1305,22 +1665,40 @@ def _find_node(nodes: List[Dict], target: str) -> Optional[Dict]:
             return nodes[idx]
     except ValueError:
         pass
-    for n in nodes:
-        if n["name"] == target:
-            return n
+    if target.startswith("@") and "/" in target:
+        subscription_name, node_name = target[1:].split("/", 1)
+        qualified = [n for n in nodes
+                     if n.get("_fleet", {}).get("subscription_name", "").casefold()
+                     == subscription_name.casefold() and n["name"] == node_name]
+        if len(qualified) == 1:
+            return qualified[0]
+        print(f"Node not found: {target}")
+        return None
+    exact = [n for n in nodes if n["name"] == target]
+    if len(exact) == 1:
+        return exact[0]
+    if len(exact) > 1:
+        print(f"Node name is ambiguous: {target}")
+        for node in exact:
+            source = node.get("_fleet", {}).get("subscription_name", "legacy")
+            print(f"  @{source}/{node['name']}")
+        return None
     matches = [n for n in nodes if target.lower() in n["name"].lower()]
     if len(matches) == 1:
         return matches[0]
     elif len(matches) > 1:
         print(f"Multiple matches for '{target}':")
         for m in matches:
-            print(f"  {m['name']}")
+            source = m.get("_fleet", {}).get("subscription_name")
+            print(f"  @{source}/{m['name']}" if source else f"  {m['name']}")
         return None
     print(f"Node not found: {target}")
     return None
 
 
 def _load_nodes() -> List[Dict]:
+    if SUBSCRIPTIONS_FILE.exists():
+        return load_aggregated_nodes(config_dir=CONFIG_DIR, warn=True)
     return GenerationStore(CONFIG_DIR).load_nodes(warn=True)
 
 
@@ -1335,13 +1713,13 @@ Two modes:
   tun     System-wide TUN + fake-IP DNS  (needs sudo, Docker auto-proxied)
 
 Commands:
-  subscription add [URL]    Store subscription URL in macOS Keychain
-  subscription status       Show redacted subscription status
-  subscription remove       Remove credentials, retain cached nodes
-  subscription migrate      Import FlClash snapshot (use --url if needed)
-  refresh [--force]         Download, validate, and atomically cache nodes
-  list                      List all nodes
-  ping [name|index]         Test TCP latency to all/specific nodes
+  subscription add [NAME] [URL]  Add a named or auto-named subscription
+  subscription status [NAME|ID]  Show redacted subscription status
+  subscription remove NAME|ID    Remove credential, retain cache until refresh
+  subscription migrate            Import FlClash snapshot (use --name/--url)
+  refresh [NAME|ID] [--force]     Refresh one or all active subscriptions
+  list                            List aggregated nodes and their sources
+  ping [name|index|@source/node]  Test TCP latency
 
   proxy start <name|index>  Start proxy mode
   proxy stop                Stop proxy mode
@@ -1377,13 +1755,27 @@ def main():
         sub = args[1] if len(args) > 1 else ""
         rest = args[2:]
         if sub == "add":
-            return cmd_subscription_add(rest[0] if rest else None)
+            if len(rest) > 2:
+                print("Try: fleet subscription add [NAME] [URL]")
+                return 1
+            if len(rest) == 2:
+                return cmd_subscription_add(rest[0], rest[1])
+            if len(rest) == 1 and rest[0].lower().startswith("https://"):
+                return cmd_subscription_add(None, rest[0])
+            return cmd_subscription_add(rest[0] if rest else None, None)
         if sub == "status":
-            return cmd_subscription_status()
+            if len(rest) > 1:
+                print("Try: fleet subscription status [NAME|ID]")
+                return 1
+            return cmd_subscription_status(rest[0] if rest else None)
         if sub == "remove":
-            return cmd_subscription_remove()
+            if len(rest) != 1:
+                print("Try: fleet subscription remove NAME|ID")
+                return 1
+            return cmd_subscription_remove(rest[0])
         if sub == "migrate":
             url = None
+            name = None
             source = CLASH_CONFIG
             index = 0
             while index < len(rest):
@@ -1393,10 +1785,13 @@ def main():
                 elif rest[index] == "--source" and index + 1 < len(rest):
                     source = Path(rest[index + 1])
                     index += 2
+                elif rest[index] == "--name" and index + 1 < len(rest):
+                    name = rest[index + 1]
+                    index += 2
                 else:
-                    print("Try: fleet subscription migrate [--url URL] [--source PATH]")
+                    print("Try: fleet subscription migrate [--name NAME] [--url URL] [--source PATH]")
                     return 1
-            return cmd_subscription_migrate(source, url)
+            return cmd_subscription_migrate(source, url, name=name)
         print("Try: fleet subscription add|status|remove|migrate")
         return 1
 
@@ -1434,10 +1829,13 @@ def main():
             return 1
     # ── Top-level commands ──
     elif cmd == "refresh":
-        if any(arg != "--force" for arg in args[1:]):
-            print("Try: fleet refresh [--force]")
+        rest = args[1:]
+        selectors = [arg for arg in rest if arg != "--force"]
+        if len(selectors) > 1:
+            print("Try: fleet refresh [NAME|ID] [--force]")
             return 1
-        return cmd_refresh(force="--force" in args[1:])
+        return cmd_refresh(force="--force" in rest,
+                           selector=selectors[0] if selectors else None)
     elif cmd in ("list", "ls"):
         return cmd_list(_load_nodes())
     elif cmd == "start":
