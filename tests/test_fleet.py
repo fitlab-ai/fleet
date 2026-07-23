@@ -109,18 +109,15 @@ class NodeValidationTests(unittest.TestCase):
 
     def test_hysteria2_normalizes_connection_fields(self):
         node = hysteria2(
-            ports="443,1000-1002", **{"hop-interval": "5-10",
-            "obfs": "gecko", "obfs-password": "obfs-secret",
-            "obfs-min-packet-size": 512, "obfs-max-packet-size": 1400,
-            "alpn": ["h3"], "bbr-profile": "aggressive"})
+            ports="443,1000-1002", **{"hop-interval": 5,
+            "obfs": "salamander", "obfs-password": "obfs-secret",
+            "alpn": ["h3"]})
         validated, _ = fleet.validate_nodes([node])
         normalized = validated[0]["_fleet_hysteria2"]
-        self.assertEqual(normalized["server_ports"], [443, "1000:1002"])
+        self.assertEqual(normalized["server_ports"], ["443:443", "1000:1002"])
         self.assertEqual(normalized["hop_interval"], "5s")
-        self.assertEqual(normalized["hop_interval_max"], "10s")
         self.assertEqual(normalized["obfs"], {
-            "type": "gecko", "password": "obfs-secret",
-            "min_packet_size": 512, "max_packet_size": 1400,
+            "type": "salamander", "password": "obfs-secret",
         })
 
     def test_hysteria2_rejects_unsupported_and_invalid_fields_without_secrets(self):
@@ -130,7 +127,11 @@ class NodeValidationTests(unittest.TestCase):
             hysteria2(**{"obfs-password": "TOP-SECRET"}),
             hysteria2(ports="0,443"),
             hysteria2(**{"hop-interval": "10-5"}),
+            hysteria2(**{"hop-interval": "5-10"}),
+            hysteria2(obfs="gecko", **{"obfs-password": "TOP-SECRET"}),
+            hysteria2(**{"obfs-min-packet-size": 512}),
             hysteria2(alpn=["h3", ""]),
+            hysteria2(**{"bbr-profile": "standard"}),
             hysteria2(**{"bbr-profile": "unknown"}),
         ]
         for node in cases:
@@ -470,17 +471,15 @@ class KeychainCredentialTests(unittest.TestCase):
 class OutboundConfigTests(unittest.TestCase):
     def test_hysteria2_outbound_preserves_normalized_connection_semantics(self):
         validated, _ = fleet.validate_nodes([hysteria2(
-            ports="443,1000-1002", **{"hop-interval": "5-10",
+            ports="443,1000-1002", **{"hop-interval": 5,
             "obfs": "salamander", "obfs-password": "secret",
-            "alpn": ["h3"], "bbr-profile": "standard", "up": 100, "down": 200})])
+            "alpn": ["h3"], "up": 100, "down": 200})])
         outbound = fleet._build_outbound(validated[0])
         self.assertNotIn("server_port", outbound)
-        self.assertEqual(outbound["server_ports"], [443, "1000:1002"])
+        self.assertEqual(outbound["server_ports"], ["443:443", "1000:1002"])
         self.assertEqual(outbound["hop_interval"], "5s")
-        self.assertEqual(outbound["hop_interval_max"], "10s")
         self.assertEqual(outbound["obfs"], {"type": "salamander", "password": "secret"})
         self.assertEqual(outbound["tls"]["alpn"], ["h3"])
-        self.assertEqual(outbound["bbr_profile"], "standard")
         self.assertEqual(fleet.mk_proxy_config(validated[0])["outbounds"][0],
                          fleet.mk_tun_config(validated[0])["outbounds"][0])
 
@@ -647,14 +646,21 @@ class RefreshPipelineTests(unittest.TestCase):
 
 
 class DependencyVersionTests(unittest.TestCase):
-    def test_rejects_old_or_unparseable_sing_box_versions(self):
+    def test_accepts_current_stable_sing_box_version(self):
+        result = mock.Mock(returncode=0, stdout="sing-box version 1.13.14\n")
+        with mock.patch.object(fleet.subprocess, "run", return_value=result):
+            self.assertEqual(fleet._require_sing_box_version("/tmp/sing-box"),
+                             (1, 13, 14))
+
+    def test_rejects_old_prerelease_or_unparseable_sing_box_versions(self):
         for result in (
-                mock.Mock(returncode=0, stdout="sing-box version 1.13.9\n"),
+                mock.Mock(returncode=0, stdout="sing-box version 1.13.13\n"),
+                mock.Mock(returncode=0, stdout="sing-box version 1.14.0-alpha.50\n"),
                 mock.Mock(returncode=0, stdout="not a version\n"),
                 mock.Mock(returncode=1, stdout="")):
             with self.subTest(stdout=result.stdout), \
                     mock.patch.object(fleet.subprocess, "run", return_value=result):
-                with self.assertRaisesRegex(fleet.SubscriptionError, "1.14.0"):
+                with self.assertRaisesRegex(fleet.SubscriptionError, "1.13.14"):
                     fleet._require_sing_box_version("/tmp/sing-box")
 
 

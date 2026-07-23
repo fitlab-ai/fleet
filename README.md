@@ -12,7 +12,7 @@ or a system-wide TUN route.
 - macOS
 - Python 3
 - Ruby with the standard `yaml` library
-- sing-box 1.14.0 or newer installed at `/opt/homebrew/bin/sing-box`
+- stable sing-box 1.13.14 or newer installed at `/opt/homebrew/bin/sing-box`
 - macOS Keychain (`/usr/bin/security`) for subscription credentials
 
 ## Install
@@ -124,11 +124,12 @@ servers, and credentials are not included in the error or refresh state.
 Refresh validates the HTTPS response, strict YAML structure, all node fields,
 supported protocols (VMess, Hysteria2, AnyTLS, Trojan), node counts, and every
 generated proxy config with `sing-box check`. Hysteria2 maps port hopping
-(`ports` and `hop-interval`), Salamander/Gecko obfuscation and password, Gecko
-packet sizes, ALPN, and BBR profile settings. Connection-affecting options that
-Fleet cannot safely translate, including `mport`, certificate fingerprints,
-Realm options, and QUIC tuning fields, are rejected instead of silently
-ignored. Trojan support covers the basic
+(`ports` and a fixed `hop-interval`), Salamander obfuscation and password, ALPN,
+bandwidth, and TLS settings supported by stable sing-box 1.13.14.
+Connection-affecting options that Fleet cannot safely translate, including
+`mport`, randomized hop intervals, Gecko obfuscation, BBR profiles, certificate
+fingerprints, Realm options, and QUIC tuning fields, are rejected instead of
+silently ignored. Trojan support covers the basic
 TCP + TLS form with password, optional SNI, a boolean `skip-cert-verify`, and an
 optional ALPN string list. Trojan WebSocket, gRPC, and other transports are
 rejected instead of being silently ignored. A refresh that shrinks below 50% of

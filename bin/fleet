@@ -65,7 +65,7 @@ STATE_FILE = CONFIG_DIR / "state.json"
 SING_BOX_CONFIG = CONFIG_DIR / "sing-box.json"
 SING_BOX_LOG = CONFIG_DIR / "sing-box.log"
 SING_BOX_BIN = "/opt/homebrew/bin/sing-box"
-MIN_SING_BOX_VERSION = (1, 14, 0)
+MIN_SING_BOX_VERSION = (1, 13, 14)
 MIN_SING_BOX_VERSION_TEXT = ".".join(map(str, MIN_SING_BOX_VERSION))
 CLASH_CONFIG = Path.home() / "Library/Application Support/com.follow.clash/config.yaml"
 SUBSCRIPTION_USER_AGENT = "clash.meta"
@@ -508,10 +508,10 @@ def validate_subscription_url(url: str) -> str:
     return value
 
 
-def _parse_hysteria2_ports(value: Any) -> List[Any]:
+def _parse_hysteria2_ports(value: Any) -> List[str]:
     if not isinstance(value, str) or not value.strip():
         raise SubscriptionError("node", "Hysteria2 ports must be a non-empty string")
-    result: List[Any] = []
+    result: List[str] = []
     seen = set()
     for item in value.split(","):
         item = item.strip()
@@ -522,7 +522,7 @@ def _parse_hysteria2_ports(value: Any) -> List[Any]:
         end = int(match.group(2) or start)
         if not 1 <= start <= end <= 65535:
             raise SubscriptionError("node", "Hysteria2 ports is outside the valid range")
-        normalized: Any = start if start == end else f"{start}:{end}"
+        normalized = f"{start}:{end}"
         if normalized in seen:
             raise SubscriptionError("node", "Hysteria2 ports contains duplicates")
         seen.add(normalized)
@@ -530,17 +530,16 @@ def _parse_hysteria2_ports(value: Any) -> List[Any]:
     return result
 
 
-def _parse_hysteria2_hop_interval(value: Any) -> tuple[str, Optional[str]]:
+def _parse_hysteria2_hop_interval(value: Any) -> str:
     if isinstance(value, bool) or not isinstance(value, (str, int)):
         raise SubscriptionError("node", "Hysteria2 hop-interval has invalid syntax")
-    match = re.fullmatch(r"([0-9]+)(?:-([0-9]+))?", str(value).strip())
+    match = re.fullmatch(r"([0-9]+)", str(value).strip())
     if not match:
         raise SubscriptionError("node", "Hysteria2 hop-interval has invalid syntax")
     minimum = int(match.group(1))
-    maximum = int(match.group(2) or minimum)
-    if minimum < 1 or maximum < minimum:
+    if minimum < 1:
         raise SubscriptionError("node", "Hysteria2 hop-interval has invalid range")
-    return f"{minimum}s", f"{maximum}s" if maximum != minimum else None
+    return f"{minimum}s"
 
 
 def _normalize_hysteria2_node(node: Dict[str, Any]) -> Dict[str, Any]:
@@ -548,6 +547,7 @@ def _normalize_hysteria2_node(node: Dict[str, Any]) -> Dict[str, Any]:
         "mport", "name-cert-verify", "fingerprint", "realm-opts",
         "recv-window-conn", "recv-window", "disable-mtu-discovery",
         "fast-open", "max-idle-time", "keep-alive-period",
+        "obfs-min-packet-size", "obfs-max-packet-size", "bbr-profile",
     )
     for field in unsupported:
         if field in node:
@@ -558,45 +558,18 @@ def _normalize_hysteria2_node(node: Dict[str, Any]) -> Dict[str, Any]:
     if "ports" in node:
         internal["server_ports"] = _parse_hysteria2_ports(node["ports"])
     if "hop-interval" in node:
-        minimum, maximum = _parse_hysteria2_hop_interval(node["hop-interval"])
-        internal["hop_interval"] = minimum
-        if maximum:
-            internal["hop_interval_max"] = maximum
+        internal["hop_interval"] = _parse_hysteria2_hop_interval(node["hop-interval"])
     obfs = node.get("obfs")
     obfs_password = node.get("obfs-password")
     if (obfs is None) != (obfs_password is None):
         raise SubscriptionError("node", "Hysteria2 obfs and obfs-password must be provided together")
     if obfs is not None:
-        if obfs not in ("salamander", "gecko") or not isinstance(obfs_password, str) or not obfs_password:
+        if obfs != "salamander" or not isinstance(obfs_password, str) or not obfs_password:
             raise SubscriptionError("node", "Hysteria2 obfs configuration is invalid")
-        obfs_config: Dict[str, Any] = {"type": obfs, "password": obfs_password}
-        gecko_fields = {"obfs-min-packet-size": "min_packet_size",
-                        "obfs-max-packet-size": "max_packet_size"}
-        if obfs == "gecko":
-            gecko = {}
-            for source, target in gecko_fields.items():
-                if source in node:
-                    value = node[source]
-                    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-                        raise SubscriptionError("node", f"Hysteria2 field '{source}' must be positive")
-                    gecko[target] = value
-            if (gecko.get("min_packet_size", 0)
-                    > gecko.get("max_packet_size", 65535)):
-                raise SubscriptionError("node", "Hysteria2 Gecko packet size range is invalid")
-            obfs_config.update(gecko)
-        elif any(field in node for field in gecko_fields):
-            raise SubscriptionError("node", "Hysteria2 Gecko fields require gecko obfs")
-        internal["obfs"] = obfs_config
-    elif any(field in node for field in
-             ("obfs-min-packet-size", "obfs-max-packet-size")):
-        raise SubscriptionError("node", "Hysteria2 Gecko fields require gecko obfs")
+        internal["obfs"] = {"type": obfs, "password": obfs_password}
     if "alpn" in node and (not isinstance(node["alpn"], list)
             or not all(isinstance(value, str) and value.strip() for value in node["alpn"])):
         raise SubscriptionError("node", "Hysteria2 alpn must be a list of non-empty strings")
-    if "bbr-profile" in node:
-        if node["bbr-profile"] not in ("conservative", "standard", "aggressive"):
-            raise SubscriptionError("node", "Hysteria2 bbr-profile is not supported")
-        internal["bbr_profile"] = node["bbr-profile"]
     if internal:
         normalized["_fleet_hysteria2"] = internal
     return normalized
@@ -730,12 +703,13 @@ def _require_sing_box_version(binary: str = SING_BOX_BIN) -> tuple[int, int, int
                                 text=True, timeout=10)
     except (OSError, subprocess.SubprocessError):
         raise SubscriptionError("sing-box", message)
-    match = re.search(r"\b([0-9]+)\.([0-9]+)\.([0-9]+)(?:[-+][^\s]+)?\b",
+    match = re.search(r"\b([0-9]+)\.([0-9]+)\.([0-9]+)([-+][^\s]+)?\b",
                       result.stdout or "")
     if result.returncode != 0 or not match:
         raise SubscriptionError("sing-box", message)
-    version = tuple(int(part) for part in match.groups())
-    if version < MIN_SING_BOX_VERSION:
+    version = tuple(int(part) for part in match.groups()[:3])
+    suffix = match.group(4) or ""
+    if suffix.startswith("-") or version < MIN_SING_BOX_VERSION:
         detected = ".".join(map(str, version))
         raise SubscriptionError(
             "sing-box", f"{message} (detected {detected})")
@@ -801,7 +775,7 @@ def _build_outbound(node: Dict) -> Dict[str, Any]:
             outbound["server_ports"] = internal["server_ports"]
         else:
             outbound["server_port"] = port
-        for field in ("hop_interval", "hop_interval_max", "obfs", "bbr_profile"):
+        for field in ("hop_interval", "obfs"):
             if field in internal:
                 outbound[field] = internal[field]
         if node.get("alpn"):
