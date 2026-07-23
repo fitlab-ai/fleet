@@ -8,7 +8,8 @@ Two modes:
 Usage:
   fleet refresh                   Parse Clash config
   fleet list                      List all nodes
-  fleet ping [node]               Test node latency (TCP)
+  fleet ping [node]               Test direct TCP port reachability
+  fleet health [node]             Test the actual proxy protocol
 
   fleet proxy start <node>        Start proxy mode
   fleet proxy stop                Stop proxy mode
@@ -25,10 +26,12 @@ Usage:
 """
 
 import json
+import concurrent.futures
 import getpass
 import hashlib
 import os
 import re
+import signal
 import shutil
 import socket
 import subprocess
@@ -41,7 +44,7 @@ import urllib.request
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, NamedTuple, Optional
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
@@ -62,6 +65,8 @@ STATE_FILE = CONFIG_DIR / "state.json"
 SING_BOX_CONFIG = CONFIG_DIR / "sing-box.json"
 SING_BOX_LOG = CONFIG_DIR / "sing-box.log"
 SING_BOX_BIN = "/opt/homebrew/bin/sing-box"
+MIN_SING_BOX_VERSION = (1, 13, 14)
+MIN_SING_BOX_VERSION_TEXT = ".".join(map(str, MIN_SING_BOX_VERSION))
 CLASH_CONFIG = Path.home() / "Library/Application Support/com.follow.clash/config.yaml"
 SUBSCRIPTION_USER_AGENT = "clash.meta"
 SUBSCRIPTION_TIMEOUT_SECONDS = _env_int("FLEET_SUBSCRIPTION_TIMEOUT", 30)
@@ -503,11 +508,79 @@ def validate_subscription_url(url: str) -> str:
     return value
 
 
+def _parse_hysteria2_ports(value: Any) -> List[str]:
+    if not isinstance(value, str) or not value.strip():
+        raise SubscriptionError("node", "Hysteria2 ports must be a non-empty string")
+    result: List[str] = []
+    seen = set()
+    for item in value.split(","):
+        item = item.strip()
+        match = re.fullmatch(r"([0-9]+)(?:-([0-9]+))?", item)
+        if not match:
+            raise SubscriptionError("node", "Hysteria2 ports has invalid syntax")
+        start = int(match.group(1))
+        end = int(match.group(2) or start)
+        if not 1 <= start <= end <= 65535:
+            raise SubscriptionError("node", "Hysteria2 ports is outside the valid range")
+        normalized = f"{start}:{end}"
+        if normalized in seen:
+            raise SubscriptionError("node", "Hysteria2 ports contains duplicates")
+        seen.add(normalized)
+        result.append(normalized)
+    return result
+
+
+def _parse_hysteria2_hop_interval(value: Any) -> str:
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise SubscriptionError("node", "Hysteria2 hop-interval has invalid syntax")
+    match = re.fullmatch(r"([0-9]+)", str(value).strip())
+    if not match:
+        raise SubscriptionError("node", "Hysteria2 hop-interval has invalid syntax")
+    minimum = int(match.group(1))
+    if minimum < 1:
+        raise SubscriptionError("node", "Hysteria2 hop-interval has invalid range")
+    return f"{minimum}s"
+
+
+def _normalize_hysteria2_node(node: Dict[str, Any]) -> Dict[str, Any]:
+    unsupported = (
+        "mport", "name-cert-verify", "fingerprint", "realm-opts",
+        "recv-window-conn", "recv-window", "disable-mtu-discovery",
+        "fast-open", "max-idle-time", "keep-alive-period",
+        "obfs-min-packet-size", "obfs-max-packet-size", "bbr-profile",
+    )
+    for field in unsupported:
+        if field in node:
+            raise SubscriptionError(
+                "node", f"Hysteria2 field '{field}' is not supported")
+    normalized = dict(node)
+    internal: Dict[str, Any] = {}
+    if "ports" in node:
+        internal["server_ports"] = _parse_hysteria2_ports(node["ports"])
+    if "hop-interval" in node:
+        internal["hop_interval"] = _parse_hysteria2_hop_interval(node["hop-interval"])
+    obfs = node.get("obfs")
+    obfs_password = node.get("obfs-password")
+    if (obfs is None) != (obfs_password is None):
+        raise SubscriptionError("node", "Hysteria2 obfs and obfs-password must be provided together")
+    if obfs is not None:
+        if obfs != "salamander" or not isinstance(obfs_password, str) or not obfs_password:
+            raise SubscriptionError("node", "Hysteria2 obfs configuration is invalid")
+        internal["obfs"] = {"type": obfs, "password": obfs_password}
+    if "alpn" in node and (not isinstance(node["alpn"], list)
+            or not all(isinstance(value, str) and value.strip() for value in node["alpn"])):
+        raise SubscriptionError("node", "Hysteria2 alpn must be a list of non-empty strings")
+    if internal:
+        normalized["_fleet_hysteria2"] = internal
+    return normalized
+
+
 def validate_nodes(nodes: Any) -> tuple[List[Dict[str, Any]], Dict[str, int]]:
     if not isinstance(nodes, list) or not nodes:
         raise SubscriptionError("structure", "Subscription contains no proxy nodes")
     names = set()
     counts = {kind: 0 for kind in SUPPORTED_PROTOCOLS}
+    validated = []
     for node in nodes:
         if not isinstance(node, dict):
             raise SubscriptionError("node", "A proxy node is not an object")
@@ -553,8 +626,11 @@ def validate_nodes(nodes: Any) -> tuple[List[Dict[str, Any]], Dict[str, int]]:
         for field in ("up", "down"):
             if kind == "hysteria2" and field in node and (isinstance(node[field], bool) or not isinstance(node[field], (int, float)) or node[field] <= 0):
                 raise SubscriptionError("node", f"{field} must be positive")
+        if kind == "hysteria2":
+            node = _normalize_hysteria2_node(node)
+        validated.append(node)
         counts[kind] += 1
-    return nodes, counts
+    return validated, counts
 
 
 def enforce_node_count(new_count: int, previous_count: int, force: bool) -> None:
@@ -619,9 +695,31 @@ def download_subscription(url: str, opener=None, timeout: int = SUBSCRIPTION_TIM
     return data
 
 
+def _require_sing_box_version(binary: str = SING_BOX_BIN) -> tuple[int, int, int]:
+    message = (f"sing-box >= {MIN_SING_BOX_VERSION_TEXT} is required; "
+               "upgrade with: brew upgrade sing-box")
+    try:
+        result = subprocess.run([binary, "version"], capture_output=True,
+                                text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        raise SubscriptionError("sing-box", message)
+    match = re.search(r"\b([0-9]+)\.([0-9]+)\.([0-9]+)([-+][^\s]+)?\b",
+                      result.stdout or "")
+    if result.returncode != 0 or not match:
+        raise SubscriptionError("sing-box", message)
+    version = tuple(int(part) for part in match.groups()[:3])
+    suffix = match.group(4) or ""
+    if suffix.startswith("-") or version < MIN_SING_BOX_VERSION:
+        detected = ".".join(map(str, version))
+        raise SubscriptionError(
+            "sing-box", f"{message} (detected {detected})")
+    return version
+
+
 def validate_with_sing_box(nodes: List[Dict[str, Any]], binary: str = SING_BOX_BIN) -> None:
     if not Path(binary).exists():
         raise SubscriptionError("sing-box", "sing-box is not installed")
+    _require_sing_box_version(binary)
     with tempfile.TemporaryDirectory(prefix="fleet-check-") as tmp:
         for index, node in enumerate(nodes):
             path = Path(tmp) / f"node-{index}.json"
@@ -668,10 +766,20 @@ def _build_outbound(node: Dict) -> Dict[str, Any]:
             outbound["transport"] = transport
 
     elif node_type == "hysteria2":
-        outbound.update({"type": "hysteria2", "server": server, "server_port": port,
+        internal = node.get("_fleet_hysteria2", {})
+        outbound.update({"type": "hysteria2", "server": server,
                          "password": node.get("password", ""),
                          "tls": {"enabled": True, "server_name": node.get("sni", server),
                                  "insecure": node.get("skip-cert-verify", False)}})
+        if internal.get("server_ports"):
+            outbound["server_ports"] = internal["server_ports"]
+        else:
+            outbound["server_port"] = port
+        for field in ("hop_interval", "obfs"):
+            if field in internal:
+                outbound[field] = internal[field]
+        if node.get("alpn"):
+            outbound["tls"]["alpn"] = node["alpn"]
         if node.get("down"):
             outbound["down_mbps"] = node["down"]
         if node.get("up"):
@@ -1074,6 +1182,11 @@ def _start(node: Dict, mode: str, system_proxy_before: Optional[Dict[str, Any]] 
     if not Path(SING_BOX_BIN).exists():
         print(f"sing-box not found: {SING_BOX_BIN}")
         print("Install it with: brew install sing-box")
+        return False
+    try:
+        _require_sing_box_version(SING_BOX_BIN)
+    except SubscriptionError as exc:
+        print(str(exc))
         return False
     owner = _port_owner(PROXY_PORT)
     if owner:
@@ -1608,9 +1721,7 @@ def cmd_subscription_migrate(source_path: Path = CLASH_CONFIG, url: Optional[str
 
 
 def cmd_ping(nodes: List[Dict], target: Optional[str] = None):
-    """Test TCP latency to node servers."""
-    import concurrent.futures
-    import socket as sock_mod
+    """Test direct TCP connectivity to node servers."""
 
     targets = nodes
     if target:
@@ -1625,14 +1736,15 @@ def cmd_ping(nodes: List[Dict], target: Optional[str] = None):
         port = node.get("port", 443)
         try:
             t0 = time.monotonic()
-            with sock_mod.create_connection((server, port), timeout=5):
+            with socket.create_connection((server, port), timeout=5):
                 elapsed = (time.monotonic() - t0) * 1000
             return (key, elapsed)
         except Exception:
             return (key, None)
 
-    print(f"Testing TCP latency to {len(targets)} node(s)...")
-    print(f"{'':4s} {'NODE':38s} {'LATENCY':>10s}")
+    print("TCP CONNECT only: checks the server port and does not verify the proxy protocol.")
+    print(f"Testing {len(targets)} node(s)...")
+    print(f"{'':4s} {'NODE':38s} {'TCP CONNECT':>20s}")
     print("-" * 56)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
@@ -1656,12 +1768,130 @@ def cmd_ping(nodes: List[Dict], target: Optional[str] = None):
         name = labels.get(key, key)
         marker = "→" if key == current else " "
         if ms is not None:
-            bar = _latency_bar(ms)
-            print(f"{marker}  {name:38s} {ms:7.0f}ms {bar}")
+            print(f"{marker}  {name:38s} {'REACHABLE':>10s} ({ms:.0f}ms)")
         else:
-            print(f"{marker}  {name:38s} {'TIMEOUT':>10s}")
+            print(f"{marker}  {name:38s} {'UNREACHABLE':>20s}")
     print("-" * 56)
+    print("Use 'fleet health [node]' to verify the actual proxy protocol.")
     return 0
+
+
+class HealthResult(NamedTuple):
+    node_key: str
+    status: str
+    elapsed_ms: Optional[int]
+    detail: str
+
+
+def _proxy_clean_env() -> Dict[str, str]:
+    blocked = {"http_proxy", "https_proxy", "all_proxy", "no_proxy"}
+    return {key: value for key, value in os.environ.items()
+            if key.lower() not in blocked}
+
+
+def _allocate_local_port() -> int:
+    with socket.socket() as probe:
+        probe.bind((PROXY_HOST, 0))
+        return int(probe.getsockname()[1])
+
+
+def _validate_health_url(value: str) -> tuple[str, str]:
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        raise SubscriptionError("health", "FLEET_HEALTH_URL must be a credential-free HTTPS URL")
+    return value, parsed.hostname
+
+
+def _terminate_health_process(process: Any) -> None:
+    if process is None or process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=2)
+    except (OSError, subprocess.SubprocessError):
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=2)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+
+def _probe_proxy_health(node: Dict[str, Any], binary: str = SING_BOX_BIN) -> HealthResult:
+    key = node.get("_fleet", {}).get("node_key", node["name"])
+    started = time.monotonic()
+    process = None
+    log_handle = None
+    try:
+        if not Path(binary).exists():
+            return HealthResult(key, "DEPENDENCY_ERROR", None, "sing_box_missing")
+        _require_sing_box_version(binary)
+        health_url, _ = _validate_health_url(
+            os.environ.get("FLEET_HEALTH_URL", "https://api.github.com"))
+        timeout = max(1, _env_int("FLEET_HEALTH_TIMEOUT", 10))
+        with tempfile.TemporaryDirectory(prefix="fleet-health-") as tmp:
+            root = Path(tmp)
+            config_path = root / "config.json"
+            log_path = root / "sing-box.log"
+            log_handle = open(log_path, "w")
+            port = 0
+            ready = False
+            for _attempt in range(3):
+                port = _allocate_local_port()
+                config = mk_proxy_config(node)
+                config["inbounds"][0]["listen_port"] = port
+                config_path.write_text(json.dumps(config))
+                process = subprocess.Popen(
+                    [binary, "run", "-c", str(config_path), "-D", str(root)],
+                    stdout=log_handle, stderr=log_handle, env=_proxy_clean_env(),
+                    start_new_session=True)
+                ready_deadline = time.monotonic() + min(timeout, 5)
+                while time.monotonic() < ready_deadline:
+                    if process.poll() is not None:
+                        break
+                    try:
+                        with socket.create_connection((PROXY_HOST, port), timeout=0.1):
+                            ready = True
+                            break
+                    except OSError:
+                        time.sleep(0.05)
+                if ready:
+                    break
+                _terminate_health_process(process)
+            if not ready:
+                return HealthResult(key, "START_FAILED", None, "startup_timeout")
+            result = subprocess.run([
+                "curl", "--proxy", f"http://{PROXY_HOST}:{port}", "--noproxy", "",
+                "--silent", "--output", "/dev/null", "--write-out", "%{http_code}",
+                "--connect-timeout", str(timeout), "--max-time", str(timeout), health_url,
+            ], capture_output=True, text=True, timeout=timeout + 2, env=_proxy_clean_env())
+            elapsed = int((time.monotonic() - started) * 1000)
+            if result.returncode == 0 and re.fullmatch(r"[1-5][0-9][0-9]", result.stdout or ""):
+                return HealthResult(key, "HEALTHY", elapsed, "http")
+            return HealthResult(key, "UNHEALTHY", elapsed, "request_failed")
+    except (OSError, subprocess.SubprocessError, SubscriptionError):
+        return HealthResult(key, "DEPENDENCY_ERROR", None, "dependency")
+    finally:
+        _terminate_health_process(process)
+        if log_handle is not None:
+            log_handle.close()
+
+
+def cmd_health(nodes: List[Dict], target: Optional[str] = None) -> int:
+    targets = nodes
+    if target:
+        node = _find_node(nodes, target)
+        if not node:
+            return 1
+        targets = [node]
+    print("PROXY HEALTH: verifies an HTTPS request through each Fleet outbound.")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(targets) or 1)) as executor:
+        results = list(executor.map(_probe_proxy_health, targets))
+    labels = {node.get("_fleet", {}).get("node_key", node["name"]): node["name"]
+              for node in nodes}
+    for result in results:
+        elapsed = f" ({result.elapsed_ms}ms)" if result.elapsed_ms is not None else ""
+        print(f"  {labels.get(result.node_key, result.node_key):38s} {result.status}{elapsed}")
+    return 0 if all(result.status == "HEALTHY" for result in results) else 1
 
 
 def cmd_export(nodes: List[Dict], target: str, mode: str = "proxy"):
@@ -1671,18 +1901,6 @@ def cmd_export(nodes: List[Dict], target: str, mode: str = "proxy"):
     config = mk_tun_config(node) if mode == "tun" else mk_proxy_config(node)
     print(json.dumps(config, indent=2, ensure_ascii=False))
     return 0
-
-
-def _latency_bar(ms: float) -> str:
-    """Visual latency indicator."""
-    if ms < 100:
-        return "🟢"
-    elif ms < 300:
-        return "🟡"
-    elif ms < 800:
-        return "🟠"
-    else:
-        return "🔴"
 
 
 def _test_proxy():
@@ -1773,7 +1991,8 @@ Commands:
   subscription migrate            Import FlClash snapshot (use --name/--url)
   refresh [NAME|ID] [--force]     Refresh one or all active subscriptions
   list                            List aggregated nodes and their sources
-  ping [name|index|@source/node]  Test TCP latency
+  ping [name|index|@source/node]  Test direct TCP port reachability only
+  health [name|index|@source/node] Test an HTTPS request via Fleet outbound
 
   proxy start <name|index>  Start proxy mode
   proxy stop                Stop proxy mode
@@ -1903,6 +2122,9 @@ def main():
     elif cmd in ("ping", "bench"):
         target = args[1] if len(args) > 1 else None
         return cmd_ping(_load_nodes(), target)
+    elif cmd == "health":
+        target = args[1] if len(args) > 1 else None
+        return cmd_health(_load_nodes(), target)
     elif cmd == "export":
         sub = args[1] if len(args) > 1 else ""
         if sub == "tun":

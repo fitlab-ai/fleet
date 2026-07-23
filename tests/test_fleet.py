@@ -32,6 +32,13 @@ def trojan(name="t", **overrides):
     return node
 
 
+def hysteria2(name="h", **overrides):
+    node = {"name": name, "type": "hysteria2", "server": "h.example.com",
+            "port": 443, "password": "hysteria-password"}
+    node.update(overrides)
+    return node
+
+
 class MemoryCredentials(fleet.CredentialBackend):
     def __init__(self):
         self.urls = {}
@@ -99,6 +106,40 @@ class NodeValidationTests(unittest.TestCase):
         with self.assertRaises(fleet.SubscriptionError):
             fleet.enforce_node_count(4, 10, False)
         fleet.enforce_node_count(1, 10, True)
+
+    def test_hysteria2_normalizes_connection_fields(self):
+        node = hysteria2(
+            ports="443,1000-1002", **{"hop-interval": 5,
+            "obfs": "salamander", "obfs-password": "obfs-secret",
+            "alpn": ["h3"]})
+        validated, _ = fleet.validate_nodes([node])
+        normalized = validated[0]["_fleet_hysteria2"]
+        self.assertEqual(normalized["server_ports"], ["443:443", "1000:1002"])
+        self.assertEqual(normalized["hop_interval"], "5s")
+        self.assertEqual(normalized["obfs"], {
+            "type": "salamander", "password": "obfs-secret",
+        })
+
+    def test_hysteria2_rejects_unsupported_and_invalid_fields_without_secrets(self):
+        cases = [
+            hysteria2(mport="443,8443"),
+            hysteria2(obfs="salamander"),
+            hysteria2(**{"obfs-password": "TOP-SECRET"}),
+            hysteria2(ports="0,443"),
+            hysteria2(**{"hop-interval": "10-5"}),
+            hysteria2(**{"hop-interval": "5-10"}),
+            hysteria2(obfs="gecko", **{"obfs-password": "TOP-SECRET"}),
+            hysteria2(**{"obfs-min-packet-size": 512}),
+            hysteria2(alpn=["h3", ""]),
+            hysteria2(**{"bbr-profile": "standard"}),
+            hysteria2(**{"bbr-profile": "unknown"}),
+        ]
+        for node in cases:
+            with self.subTest(node=node):
+                with self.assertRaises(fleet.SubscriptionError) as raised:
+                    fleet.validate_nodes([node])
+                self.assertEqual(raised.exception.category, "node")
+                self.assertNotIn("TOP-SECRET", str(raised.exception))
 
 
 class GenerationStoreTests(unittest.TestCase):
@@ -428,6 +469,20 @@ class KeychainCredentialTests(unittest.TestCase):
         self.assertEqual(accounts, [f"{backend.username}:{one}", f"{backend.username}:{two}"])
 
 class OutboundConfigTests(unittest.TestCase):
+    def test_hysteria2_outbound_preserves_normalized_connection_semantics(self):
+        validated, _ = fleet.validate_nodes([hysteria2(
+            ports="443,1000-1002", **{"hop-interval": 5,
+            "obfs": "salamander", "obfs-password": "secret",
+            "alpn": ["h3"], "up": 100, "down": 200})])
+        outbound = fleet._build_outbound(validated[0])
+        self.assertNotIn("server_port", outbound)
+        self.assertEqual(outbound["server_ports"], ["443:443", "1000:1002"])
+        self.assertEqual(outbound["hop_interval"], "5s")
+        self.assertEqual(outbound["obfs"], {"type": "salamander", "password": "secret"})
+        self.assertEqual(outbound["tls"]["alpn"], ["h3"])
+        self.assertEqual(fleet.mk_proxy_config(validated[0])["outbounds"][0],
+                         fleet.mk_tun_config(validated[0])["outbounds"][0])
+
     def test_trojan_outbound_maps_tls_fields(self):
         node = trojan(sni="sni.example.com", alpn=["h2", "http/1.1"],
                       **{"skip-cert-verify": True})
@@ -583,10 +638,87 @@ class RefreshPipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             binary = Path(tmp) / "sing-box"
             binary.touch()
+            version = mock.Mock(returncode=0, stdout="sing-box version 1.14.2\n")
             failed = mock.Mock(returncode=1)
-            with mock.patch.object(fleet.subprocess, "run", return_value=failed):
+            with mock.patch.object(fleet.subprocess, "run", side_effect=[version, failed]):
                 with self.assertRaisesRegex(fleet.SubscriptionError, "broken-node"):
                     fleet.validate_with_sing_box([vmess("broken-node")], str(binary))
+
+
+class DependencyVersionTests(unittest.TestCase):
+    def test_accepts_current_stable_sing_box_version(self):
+        result = mock.Mock(returncode=0, stdout="sing-box version 1.13.14\n")
+        with mock.patch.object(fleet.subprocess, "run", return_value=result):
+            self.assertEqual(fleet._require_sing_box_version("/tmp/sing-box"),
+                             (1, 13, 14))
+
+    def test_rejects_old_prerelease_or_unparseable_sing_box_versions(self):
+        for result in (
+                mock.Mock(returncode=0, stdout="sing-box version 1.13.13\n"),
+                mock.Mock(returncode=0, stdout="sing-box version 1.14.0-alpha.50\n"),
+                mock.Mock(returncode=0, stdout="not a version\n"),
+                mock.Mock(returncode=1, stdout="")):
+            with self.subTest(stdout=result.stdout), \
+                    mock.patch.object(fleet.subprocess, "run", return_value=result):
+                with self.assertRaisesRegex(fleet.SubscriptionError, "1.13.14"):
+                    fleet._require_sing_box_version("/tmp/sing-box")
+
+
+class DiagnosticsTests(unittest.TestCase):
+    def test_ping_is_explicitly_tcp_only(self):
+        out = io.StringIO()
+        connection = mock.MagicMock()
+        connection.__enter__.return_value = connection
+        with mock.patch.object(fleet.socket, "create_connection", return_value=connection), \
+                mock.patch.object(fleet, "_load_state", return_value={}), \
+                redirect_stdout(out):
+            self.assertEqual(fleet.cmd_ping([vmess()]), 0)
+        text = out.getvalue()
+        self.assertIn("TCP CONNECT", text)
+        self.assertIn("REACHABLE", text)
+        self.assertIn("does not verify the proxy protocol", text)
+        self.assertNotIn("LATENCY", text)
+        self.assertNotIn("TIMEOUT", text)
+
+    def test_health_command_keeps_order_and_returns_nonzero(self):
+        results = {
+            "one": fleet.HealthResult("one", "HEALTHY", 12, "http"),
+            "two": fleet.HealthResult("two", "UNHEALTHY", 20, "request_failed"),
+        }
+        nodes = [vmess("one"), vmess("two")]
+        out = io.StringIO()
+        with mock.patch.object(fleet, "_probe_proxy_health",
+                               side_effect=lambda node: results[node["name"]]), \
+                redirect_stdout(out):
+            self.assertEqual(fleet.cmd_health(nodes), 1)
+        text = out.getvalue()
+        self.assertLess(text.index("one"), text.index("two"))
+        self.assertIn("HEALTHY", text)
+        self.assertIn("UNHEALTHY", text)
+
+    def test_health_retries_after_early_core_exit(self):
+        first = mock.Mock(pid=101)
+        first.poll.return_value = 1
+        second = mock.Mock(pid=202)
+        second.poll.side_effect = [None, None]
+        second.wait.return_value = 0
+        connection = mock.MagicMock()
+        connection.__enter__.return_value = connection
+        curl = mock.Mock(returncode=0, stdout="204")
+        with mock.patch.object(fleet.Path, "exists", return_value=True), \
+                mock.patch.object(fleet, "_require_sing_box_version"), \
+                mock.patch.object(fleet, "_allocate_local_port",
+                                  side_effect=[41001, 41002]) as allocate, \
+                mock.patch.object(fleet.subprocess, "Popen",
+                                  side_effect=[first, second]) as popen, \
+                mock.patch.object(fleet.socket, "create_connection",
+                                  return_value=connection), \
+                mock.patch.object(fleet.subprocess, "run", return_value=curl), \
+                mock.patch.object(fleet.os, "killpg"):
+            result = fleet._probe_proxy_health(vmess())
+        self.assertEqual(result.status, "HEALTHY")
+        self.assertEqual(allocate.call_count, 2)
+        self.assertEqual(popen.call_count, 2)
 
 
 class SecureFileTests(unittest.TestCase):
