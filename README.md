@@ -12,7 +12,7 @@ or a system-wide TUN route.
 - macOS
 - Python 3
 - Ruby with the standard `yaml` library
-- sing-box installed at `/opt/homebrew/bin/sing-box`
+- sing-box 1.14.0 or newer installed at `/opt/homebrew/bin/sing-box`
 - macOS Keychain (`/usr/bin/security`) for subscription credentials
 
 ## Install
@@ -32,6 +32,7 @@ fleet subscription status
 fleet refresh
 fleet list
 fleet ping
+fleet health
 
 # Duplicate node names can be selected with their subscription source.
 fleet proxy start '@airport-b/Hong Kong 01'
@@ -122,7 +123,12 @@ servers, and credentials are not included in the error or refresh state.
 
 Refresh validates the HTTPS response, strict YAML structure, all node fields,
 supported protocols (VMess, Hysteria2, AnyTLS, Trojan), node counts, and every
-generated proxy config with `sing-box check`. Trojan support covers the basic
+generated proxy config with `sing-box check`. Hysteria2 maps port hopping
+(`ports` and `hop-interval`), Salamander/Gecko obfuscation and password, Gecko
+packet sizes, ALPN, and BBR profile settings. Connection-affecting options that
+Fleet cannot safely translate, including `mport`, certificate fingerprints,
+Realm options, and QUIC tuning fields, are rejected instead of silently
+ignored. Trojan support covers the basic
 TCP + TLS form with password, optional SNI, a boolean `skip-cert-verify`, and an
 optional ALPN string list. Trojan WebSocket, gRPC, and other transports are
 rejected instead of being silently ignored. A refresh that shrinks below 50% of
@@ -139,6 +145,17 @@ needed:
 ```sh
 FLEET_SUBSCRIPTION_TIMEOUT=60 fleet refresh
 ```
+
+`fleet ping [node]` is only a direct TCP connect test to the advertised server
+port. It reports `REACHABLE` or `UNREACHABLE`; it does not perform a proxy
+protocol handshake and is not meaningful as Hysteria2/QUIC health.
+
+`fleet health [node]` starts an isolated temporary sing-box instance for each
+selected node and makes an HTTPS request through its mixed proxy. It does not
+change Fleet's running instance, selected node, system proxy, or TUN state.
+The default target is `https://api.github.com`; override it with a
+credential-free HTTPS URL in `FLEET_HEALTH_URL`, and set the bounded request
+timeout with `FLEET_HEALTH_TIMEOUT`.
 
 TLS certificate and hostname verification are enabled by default, and Fleet has
 no CLI option to bypass them. If a trusted subscription explicitly sets the
