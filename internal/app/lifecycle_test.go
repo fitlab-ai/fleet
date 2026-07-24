@@ -2,9 +2,30 @@ package app
 
 import (
 	"errors"
+	"os/exec"
 	"testing"
 	"time"
 )
+
+func TestConfigureLauncherKeepsNonRootTUNInSudoSession(t *testing.T) {
+	cmd := exec.Command("sudo", "-n", "true")
+
+	configureLauncher(cmd, "tun", 501)
+
+	if cmd.SysProcAttr != nil {
+		t.Fatal("non-root TUN launcher must retain the sudo credential session")
+	}
+}
+
+func TestConfigureLauncherIsolatesProxyProcess(t *testing.T) {
+	cmd := exec.Command("sing-box", "run")
+
+	configureLauncher(cmd, "proxy", 501)
+
+	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setsid {
+		t.Fatal("proxy launcher must start in a new session")
+	}
+}
 
 func TestParseSingBoxPIDUsesFullArgvWhenCommIsTruncated(t *testing.T) {
 	output := "  84233   /opt/homebrew/bi   /opt/homebrew/bin/sing-box run -c /tmp/fleet/.config/fleet/sing-box.json -D /tmp/fleet/.config/fleet\n"

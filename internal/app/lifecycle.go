@@ -115,6 +115,13 @@ func waitForReady(find func() int, ready func(int) bool, exited <-chan error, at
 	return 0, errors.New("sing-box did not become ready")
 }
 
+func configureLauncher(cmd *exec.Cmd, mode string, euid int) {
+	if mode == "tun" && euid != 0 {
+		return
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+}
+
 func (a *App) Start(target, mode string) int {
 	_ = a.stop(false)
 	node, err := model.ResolveNode(a.LoadNodes(true), target)
@@ -192,7 +199,7 @@ func (a *App) Start(target, mode string) int {
 		cmd = exec.Command("sudo", append([]string{"-n", "env", "ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true", "ENABLE_DEPRECATED_OUTBOUND_DNS_RULE_ITEM=true", a.Config.SingBox}, args...)...)
 	}
 	cmd.Stdout, cmd.Stderr, cmd.Env = log, log, env
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	configureLauncher(cmd, mode, os.Geteuid())
 	if err := cmd.Start(); err != nil {
 		_ = log.Close()
 		a.printf("✗ Failed to start %s mode\n", mode)
