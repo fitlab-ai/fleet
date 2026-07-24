@@ -10,18 +10,28 @@ or a system-wide TUN route.
 ## Requirements
 
 - macOS
-- Python 3
-- Ruby with the standard `yaml` library
+- Go 1.26 or newer (build/install only)
 - stable sing-box 1.13.14 or newer installed at `/opt/homebrew/bin/sing-box`
 - macOS Keychain (`/usr/bin/security`) for subscription credentials
 
 ## Install
 
 ```sh
-install -m 0755 bin/fleet ~/.local/bin/fleet
+scripts/install-local.sh
 ```
 
-Make sure `~/.local/bin` is in your `PATH`.
+The installer runs the Go test suite, builds the binary, keeps a timestamped
+backup of an existing `~/.local/bin/fleet`, and atomically installs the new
+binary. It prints the exact rollback command when a backup is created. Set
+`FLEET_INSTALL_DIR` to install elsewhere.
+
+For a build without installation:
+
+```sh
+go build -trimpath -o dist/fleet ./cmd/fleet
+```
+
+Make sure the install directory is in your `PATH`.
 
 ## Usage
 
@@ -176,11 +186,25 @@ cache data; after that, the name may be added again with a new UUID and URL.
 All new write commands acquire `refresh.lock` followed by `writer.lock`. This
 coordinates with older Fleet refresh/migrate processes during upgrade. Do not
 mix old and new binaries for add/remove operations because older releases did
-not lock those commands. The first new write migrates a legacy single
+not lock those commands. The first Go write migrates a legacy single
 subscription into `subscription-1` without deleting the legacy Keychain item or
 cache, so readers can safely fall back if migration does not commit. FlClash is
 only consulted by the explicit `subscription migrate` command and is not a
 refresh dependency.
+
+## Development
+
+```sh
+go test ./...
+go test -race ./...
+go vet ./...
+```
+
+The Go implementation is split into small internal packages for CLI
+orchestration, storage, subscriptions, Keychain access, sing-box configuration,
+macOS lifecycle operations, and diagnostics. During the migration review,
+`tests/compatibility-matrix.md` tracks every historical Python behavior test and
+the corresponding Go or macOS validation evidence.
 
 The listening port defaults to `7890` and can be overridden:
 
