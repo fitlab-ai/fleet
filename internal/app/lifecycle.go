@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -18,6 +19,37 @@ import (
 	"github.com/fitlab-ai/fleet/internal/store"
 )
 
+func hasProcessArg(args []string, flag, value string) bool {
+	for index := 0; index+1 < len(args); index++ {
+		if args[index] == flag && filepath.Clean(args[index+1]) == filepath.Clean(value) {
+			return true
+		}
+	}
+	return false
+}
+
+func parseSingBoxPID(output, configDir string) int {
+	configPath := filepath.Join(configDir, "sing-box.json")
+	for _, line := range strings.Split(output, "\n") {
+		parts := strings.Fields(line)
+		if len(parts) < 3 {
+			continue
+		}
+		args := parts[2:]
+		if filepath.Base(args[0]) != "sing-box" {
+			continue
+		}
+		if !hasProcessArg(args, "-c", configPath) || !hasProcessArg(args, "-D", configDir) {
+			continue
+		}
+		pid, err := strconv.Atoi(parts[0])
+		if err == nil {
+			return pid
+		}
+	}
+	return 0
+}
+
 func (a *App) findSingBox() int {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -25,47 +57,62 @@ func (a *App) findSingBox() int {
 	if err != nil {
 		return 0
 	}
-	for _, line := range strings.Split(string(result), "\n") {
-		parts := strings.Fields(line)
-		if len(parts) < 3 {
-			continue
-		}
-		if filepath.Base(parts[1]) == "sing-box" && strings.Contains(line, a.Config.Dir) {
-			pid, _ := strconv.Atoi(parts[0])
-			return pid
-		}
-	}
-	return 0
+	return parseSingBoxPID(string(result), a.Config.Dir)
 }
 
-func (a *App) portOwner() string {
+func (a *App) portOwnerDetails() (string, int) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	result, err := exec.CommandContext(ctx, "lsof", "-nP", fmt.Sprintf("-iTCP:%d", a.Config.Port), "-sTCP:LISTEN").Output()
 	if err != nil {
-		return ""
+		return "", 0
 	}
 	scanner := bufio.NewScanner(strings.NewReader(string(result)))
 	_ = scanner.Scan()
 	if scanner.Scan() {
 		parts := strings.Fields(scanner.Text())
 		if len(parts) >= 2 {
-			return fmt.Sprintf("%s (PID %s)", parts[0], parts[1])
+			pid, _ := strconv.Atoi(parts[1])
+			return parts[0], pid
 		}
 	}
-	return ""
+	return "", 0
 }
 
-func waitForPID(find func() int, fallback func() int, attempts int, interval time.Duration) int {
+func (a *App) portOwner() string {
+	name, pid := a.portOwnerDetails()
+	if pid == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s (PID %d)", name, pid)
+}
+
+func waitForReady(find func() int, ready func(int) bool, exited <-chan error, attempts int, interval time.Duration) (int, error) {
 	for attempt := 0; attempt < attempts; attempt++ {
-		if pid := find(); pid != 0 {
-			return pid
+		select {
+		case err := <-exited:
+			if err == nil {
+				err = errors.New("launcher exited before sing-box was ready")
+			}
+			return 0, err
+		default:
+		}
+		if pid := find(); pid != 0 && ready(pid) {
+			select {
+			case err := <-exited:
+				if err == nil {
+					err = errors.New("launcher exited before sing-box was ready")
+				}
+				return 0, err
+			default:
+				return pid, nil
+			}
 		}
 		if attempt+1 < attempts {
 			time.Sleep(interval)
 		}
 	}
-	return fallback()
+	return 0, errors.New("sing-box did not become ready")
 }
 
 func (a *App) Start(target, mode string) int {
@@ -134,6 +181,14 @@ func (a *App) Start(target, mode string) int {
 	args := []string{"run", "-c", configPath, "-D", a.Config.Dir}
 	cmd := exec.Command(a.Config.SingBox, args...)
 	if mode == "tun" && os.Geteuid() != 0 {
+		a.printf("Requesting sudo to start TUN mode...\n")
+		sudo := exec.Command("sudo", "-v")
+		sudo.Stdin, sudo.Stdout, sudo.Stderr = a.In, a.Out, a.Out
+		if err := sudo.Run(); err != nil {
+			_ = log.Close()
+			a.printf("Could not obtain sudo credentials.\nRun 'sudo -v' in your terminal, then retry.\n")
+			return 1
+		}
 		cmd = exec.Command("sudo", append([]string{"-n", "env", "ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true", "ENABLE_DEPRECATED_OUTBOUND_DNS_RULE_ITEM=true", a.Config.SingBox}, args...)...)
 	}
 	cmd.Stdout, cmd.Stderr, cmd.Env = log, log, env
@@ -144,16 +199,18 @@ func (a *App) Start(target, mode string) int {
 		return 1
 	}
 	_ = log.Close()
-	pid := waitForPID(a.findSingBox, func() int {
-		if cmd.Process == nil {
-			return 0
+	exited := make(chan error, 1)
+	go func() {
+		exited <- cmd.Wait()
+	}()
+	pid, startErr := waitForReady(a.findSingBox, func(pid int) bool {
+		_, ownerPID := a.portOwnerDetails()
+		return ownerPID == pid
+	}, exited, 20, 200*time.Millisecond)
+	if startErr != nil {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
 		}
-		if cmd.Process.Signal(syscall.Signal(0)) == nil {
-			return cmd.Process.Pid
-		}
-		return 0
-	}, 20, 200*time.Millisecond)
-	if pid == 0 {
 		a.printf("✗ Failed to start %s mode\n  Log: cat %s\n", mode, logPath)
 		return 1
 	}
