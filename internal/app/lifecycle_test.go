@@ -3,6 +3,7 @@ package app
 import (
 	"errors"
 	"os/exec"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -106,5 +107,69 @@ func TestWaitForReadyRejectsProcessWithoutListeningPort(t *testing.T) {
 	}
 	if pid != 0 {
 		t.Fatalf("pid = %d, want 0", pid)
+	}
+}
+
+func TestProcessReadyAcceptsTUNWhenRootListenerIsReachable(t *testing.T) {
+	ready := processReady("tun", 4242,
+		func() int { return 0 },
+		func() bool { return true },
+	)
+
+	if !ready {
+		t.Fatal("TUN process with a strictly matched PID and reachable listener should be ready")
+	}
+}
+
+func TestProcessReadyStillRequiresMatchingOwnerForProxy(t *testing.T) {
+	ready := processReady("proxy", 4242,
+		func() int { return 0 },
+		func() bool { return true },
+	)
+
+	if ready {
+		t.Fatal("proxy readiness must require the listener owner PID")
+	}
+}
+
+func TestTerminateMatchedProcessUsesPrivilegedSignalsAndWaitsForExit(t *testing.T) {
+	var signals []syscall.Signal
+	findCalls := 0
+	err := terminateMatchedProcess(4242, true,
+		func(_ int, signal syscall.Signal, privileged bool) error {
+			if !privileged {
+				t.Fatal("root TUN process must use privileged signals")
+			}
+			signals = append(signals, signal)
+			return nil
+		},
+		func() int {
+			findCalls++
+			if findCalls < 3 {
+				return 4242
+			}
+			return 0
+		},
+		func(time.Duration) {},
+	)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(signals) != 1 || signals[0] != syscall.SIGTERM {
+		t.Fatalf("signals = %v, want [SIGTERM]", signals)
+	}
+}
+
+func TestTerminateMatchedProcessPropagatesPrivilegedSignalFailure(t *testing.T) {
+	want := errors.New("sudo denied")
+	err := terminateMatchedProcess(4242, true,
+		func(_ int, _ syscall.Signal, _ bool) error { return want },
+		func() int { return 4242 },
+		func(time.Duration) {},
+	)
+
+	if !errors.Is(err, want) {
+		t.Fatalf("error = %v, want %v", err, want)
 	}
 }

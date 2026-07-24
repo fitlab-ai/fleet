@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -87,6 +88,73 @@ func (a *App) portOwner() string {
 	return fmt.Sprintf("%s (PID %d)", name, pid)
 }
 
+func processReady(mode string, pid int, ownerPID func() int, reachable func() bool) bool {
+	if mode == "tun" {
+		return reachable()
+	}
+	return ownerPID() == pid
+}
+
+func terminateMatchedProcess(
+	pid int,
+	privileged bool,
+	signal func(int, syscall.Signal, bool) error,
+	find func() int,
+	sleep func(time.Duration),
+) error {
+	if err := signal(pid, syscall.SIGTERM, privileged); err != nil {
+		return err
+	}
+	for range 10 {
+		if find() != pid {
+			return nil
+		}
+		sleep(100 * time.Millisecond)
+	}
+	if err := signal(pid, syscall.SIGKILL, privileged); err != nil {
+		return err
+	}
+	for range 10 {
+		if find() != pid {
+			return nil
+		}
+		sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("process %d did not exit", pid)
+}
+
+func signalProcess(pid int, signal syscall.Signal, privileged bool) error {
+	if privileged {
+		name := map[syscall.Signal]string{
+			syscall.SIGTERM: "TERM",
+			syscall.SIGKILL: "KILL",
+		}[signal]
+		if name == "" {
+			return fmt.Errorf("unsupported privileged signal %d", signal)
+		}
+		return exec.Command("sudo", "-n", "kill", "-"+name, strconv.Itoa(pid)).Run()
+	}
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	return process.Signal(signal)
+}
+
+func processPID(pid int) func() int {
+	return func() int {
+		process, err := os.FindProcess(pid)
+		if err != nil {
+			return 0
+		}
+		err = process.Signal(syscall.Signal(0))
+		if err == nil || errors.Is(err, syscall.EPERM) {
+			return pid
+		}
+		return 0
+	}
+}
+
 func waitForReady(find func() int, ready func(int) bool, exited <-chan error, attempts int, interval time.Duration) (int, error) {
 	for attempt := 0; attempt < attempts; attempt++ {
 		select {
@@ -123,7 +191,10 @@ func configureLauncher(cmd *exec.Cmd, mode string, euid int) {
 }
 
 func (a *App) Start(target, mode string) int {
-	_ = a.stop(false)
+	if _, err := a.stop(false); err != nil {
+		a.printf("Could not stop the running instance: %s\n", err)
+		return 1
+	}
 	node, err := model.ResolveNode(a.LoadNodes(true), target)
 	if err != nil {
 		if target == "" {
@@ -211,8 +282,17 @@ func (a *App) Start(target, mode string) int {
 		exited <- cmd.Wait()
 	}()
 	pid, startErr := waitForReady(a.findSingBox, func(pid int) bool {
-		_, ownerPID := a.portOwnerDetails()
-		return ownerPID == pid
+		return processReady(mode, pid, func() int {
+			_, ownerPID := a.portOwnerDetails()
+			return ownerPID
+		}, func() bool {
+			connection, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", a.Config.Port), 200*time.Millisecond)
+			if err != nil {
+				return false
+			}
+			_ = connection.Close()
+			return true
+		})
 	}, exited, 20, 200*time.Millisecond)
 	if startErr != nil {
 		if cmd.Process != nil {
@@ -241,18 +321,25 @@ func (a *App) Start(target, mode string) int {
 	return 0
 }
 
-func (a *App) stop(verbose bool) bool {
+func (a *App) stop(verbose bool) (bool, error) {
 	state, _ := a.LoadState()
 	pid := a.findSingBox()
+	matched := pid > 0
 	if pid == 0 && state != nil {
 		pid = state.PID
 	}
 	if pid > 0 {
-		process, _ := os.FindProcess(pid)
-		_ = process.Signal(syscall.SIGTERM)
-		time.Sleep(time.Second)
-		if process.Signal(syscall.Signal(0)) == nil {
-			_ = process.Signal(syscall.SIGKILL)
+		find := processPID(pid)
+		privileged := false
+		if matched {
+			find = a.findSingBox
+			privileged = state != nil && state.Mode == "tun" && os.Geteuid() != 0
+		}
+		if err := terminateMatchedProcess(pid, privileged, signalProcess, find, time.Sleep); err != nil {
+			if verbose {
+				a.printf("✗ Failed to stop PID %d: %s\n", pid, err)
+			}
+			return state != nil || pid > 0, err
 		}
 	}
 	if state != nil {
@@ -268,10 +355,15 @@ func (a *App) stop(verbose bool) bool {
 			a.printf("System proxy cleaned\n")
 		}
 	}
-	return state != nil || pid > 0
+	return state != nil || pid > 0, nil
 }
 
-func (a *App) Stop() int { a.stop(true); return 0 }
+func (a *App) Stop() int {
+	if _, err := a.stop(true); err != nil {
+		return 1
+	}
+	return 0
+}
 
 func (a *App) Switch(target, mode string) int {
 	if mode == "" {
@@ -287,7 +379,10 @@ func (a *App) Switch(target, mode string) int {
 		return 1
 	}
 	a.printf("Switching [%s] → %s\n", mode, node.Name)
-	a.stop(false)
+	if _, err := a.stop(false); err != nil {
+		a.printf("✗ Failed to stop the running instance: %s\n", err)
+		return 1
+	}
 	if code := a.Start(target, mode); code != 0 {
 		a.printf("✗ Failed\n")
 		return 1
