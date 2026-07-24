@@ -9,3 +9,4 @@ __pycache__/
 .agents/workspace/archive/
 .agents/workspace/logs/
 .agents/workspace/.merge-backup/
+dist/
