@@ -200,11 +200,14 @@ go test -race ./...
 go vet ./...
 ```
 
-The Go implementation is split into small internal packages for CLI
+Fleet is implemented exclusively by the Go control plane built from
+`cmd/fleet`; the retired Python entry point is not a supported runtime or
+rollback target. The Go implementation is split into small internal packages for CLI
 orchestration, storage, subscriptions, Keychain access, sing-box configuration,
-macOS lifecycle operations, and diagnostics. During the migration review,
-`tests/compatibility-matrix.md` tracks every historical Python behavior test and
-the corresponding Go or macOS validation evidence.
+macOS lifecycle operations, and diagnostics. `tests/compatibility-matrix.md` is
+the permanent compatibility ledger for all 48 historical behavior IDs. Its Go
+gate verifies that every ID has one terminal evidence row and that every cited
+Go test symbol exists, without retaining or executing the retired Python tests.
 
 The listening port defaults to `7890` and can be overridden:
 

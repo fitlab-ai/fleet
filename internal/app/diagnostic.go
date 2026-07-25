@@ -82,7 +82,11 @@ func (a *App) Health(target string) int {
 	a.printf("PROXY HEALTH: verifies an HTTPS request through each Fleet outbound.\n")
 	failures := 0
 	for _, node := range targets {
-		status, elapsed := a.probeHealth(node)
+		probe := a.healthProbe
+		if probe == nil {
+			probe = a.probeHealth
+		}
+		status, elapsed := probe(node)
 		if status != "HEALTHY" {
 			failures++
 		}
@@ -99,12 +103,26 @@ func (a *App) Health(target string) int {
 }
 
 func (a *App) probeHealth(node model.Node) (string, int64) {
+	attempt := a.healthTry
+	if attempt == nil {
+		attempt = a.probeHealthAttempt
+	}
+	for try := 0; try < 2; try++ {
+		status, elapsed, retry := attempt(node)
+		if !retry {
+			return status, elapsed
+		}
+	}
+	return "START_FAILED", -1
+}
+
+func (a *App) probeHealthAttempt(node model.Node) (string, int64, bool) {
 	if _, err := os.Stat(a.Config.SingBox); err != nil {
-		return "DEPENDENCY_ERROR", -1
+		return "DEPENDENCY_ERROR", -1, false
 	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		return "START_FAILED", -1
+		return "START_FAILED", -1, false
 	}
 	port := listener.Addr().(*net.TCPAddr).Port
 	_ = listener.Close()
@@ -113,21 +131,37 @@ func (a *App) probeHealth(node model.Node) (string, int64) {
 	root, _ := os.MkdirTemp("", "fleet-health-")
 	defer os.RemoveAll(root)
 	path := filepath.Join(root, "config.json")
-	_ = os.WriteFile(path, data, 0o600)
+	writeFile := a.writeFile
+	if writeFile == nil {
+		writeFile = os.WriteFile
+	}
+	if err := writeFile(path, data, 0o600); err != nil {
+		return "CONFIG_ERROR", -1, false
+	}
 	log, _ := os.OpenFile(filepath.Join(root, "sing-box.log"), os.O_CREATE|os.O_WRONLY, 0o600)
 	cmd := exec.Command(a.Config.SingBox, "run", "-c", path, "-D", root)
 	cmd.Stdout, cmd.Stderr = log, log
 	if err := cmd.Start(); err != nil {
 		_ = log.Close()
-		return "START_FAILED", -1
+		return "START_FAILED", -1, false
 	}
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
 	defer func() {
 		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
+		select {
+		case <-exited:
+		case <-time.After(time.Second):
+		}
 		_ = log.Close()
 	}()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
+		select {
+		case <-exited:
+			return "START_FAILED", -1, true
+		default:
+		}
 		conn, connectErr := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 100*time.Millisecond)
 		if connectErr == nil {
 			_ = conn.Close()
@@ -146,7 +180,7 @@ func (a *App) probeHealth(node model.Node) (string, int64) {
 	output, err := curl.Output()
 	elapsed := time.Since(start).Milliseconds()
 	if err == nil && len(output) == 3 && output[0] >= '1' && output[0] <= '5' {
-		return "HEALTHY", elapsed
+		return "HEALTHY", elapsed, false
 	}
-	return "UNHEALTHY", elapsed
+	return "UNHEALTHY", elapsed, false
 }
