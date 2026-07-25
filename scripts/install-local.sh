@@ -14,7 +14,11 @@ go build -trimpath -o "$build_dir/fleet" ./cmd/fleet
 "$build_dir/fleet" help >/dev/null
 
 backup=
+backup_is_python=false
 if [ -e "$target" ]; then
+  if head -n 1 "$target" 2>/dev/null | grep -q '^#!.*python'; then
+    backup_is_python=true
+  fi
   backup="$target.backup.$(date +%Y%m%d%H%M%S)"
   mv "$target" "$backup"
 fi
@@ -22,6 +26,8 @@ install -m 0755 "$build_dir/fleet" "$target.new"
 mv "$target.new" "$target"
 
 printf 'Installed Fleet Go binary: %s\n' "$target"
-if [ -n "$backup" ]; then
+if [ -n "$backup" ] && [ "$backup_is_python" = false ]; then
   printf 'Rollback: mv %s %s\n' "$backup" "$target"
+elif [ -n "$backup" ]; then
+  printf 'Archived retired Python control plane: %s\n' "$backup"
 fi

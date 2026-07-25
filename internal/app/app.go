@@ -32,6 +32,13 @@ type App struct {
 	Credentials credential.Backend
 	Out         io.Writer
 	In          io.Reader
+	healthProbe func(model.Node) (string, int64)
+	healthTry   func(model.Node) (string, int64, bool)
+	download    func(string) ([]byte, error)
+	validate    func([]model.Node, int) error
+	publish     func(string, []byte, []model.Node) (string, error)
+	writeState  func(string, string, RecordState) error
+	writeFile   func(string, []byte, os.FileMode) error
 }
 
 func DefaultConfig() Config {
@@ -285,6 +292,34 @@ func writeRecordState(configDir, id string, state RecordState) error {
 	return store.AtomicJSON(filepath.Join(subscriptionRoot(configDir, id), "state.json"), state)
 }
 
+func (a *App) downloadSource(rawURL string) ([]byte, error) {
+	if a.download != nil {
+		return a.download(rawURL)
+	}
+	return (subscription.Downloader{Timeout: a.Config.Timeout}).Download(rawURL)
+}
+
+func (a *App) validateWithSingBox(nodes []model.Node) error {
+	if a.validate != nil {
+		return a.validate(nodes, a.Config.Port)
+	}
+	return (backend.SingBox{Binary: a.Config.SingBox}).ValidateNodes(nodes, a.Config.Port)
+}
+
+func (a *App) publishGeneration(root string, source []byte, nodes []model.Node) (string, error) {
+	if a.publish != nil {
+		return a.publish(root, source, nodes)
+	}
+	return store.NewGenerationStore(root).Publish(source, nodes)
+}
+
+func (a *App) saveRecordState(id string, state RecordState) error {
+	if a.writeState != nil {
+		return a.writeState(a.Config.Dir, id, state)
+	}
+	return writeRecordState(a.Config.Dir, id, state)
+}
+
 func (a *App) SubscriptionStatus(selector string) int {
 	if _, err := os.Stat(filepath.Join(a.Config.Dir, "subscriptions.json")); err != nil {
 		configured := a.Credentials.IsConfigured("")
@@ -394,7 +429,7 @@ func (a *App) Refresh(selector string, force bool) int {
 		rawURL, itemErr := a.Credentials.GetURL(record.ID)
 		var source []byte
 		if itemErr == nil {
-			source, itemErr = (subscription.Downloader{Timeout: a.Config.Timeout}).Download(rawURL)
+			source, itemErr = a.downloadSource(rawURL)
 		}
 		var nodes []model.Node
 		var counts map[string]int
@@ -408,19 +443,19 @@ func (a *App) Refresh(selector string, force bool) int {
 			itemErr = subscription.EnforceNodeCount(len(nodes), state.NodeCount, force)
 		}
 		if itemErr == nil {
-			itemErr = (backend.SingBox{Binary: a.Config.SingBox}).ValidateNodes(nodes, a.Config.Port)
+			itemErr = a.validateWithSingBox(nodes)
 		}
 		if itemErr == nil {
 			var generation string
-			generation, itemErr = store.NewGenerationStore(subscriptionRoot(a.Config.Dir, record.ID)).Publish(source, nodes)
+			generation, itemErr = a.publishGeneration(subscriptionRoot(a.Config.Dir, record.ID), source, nodes)
 			if itemErr == nil {
 				state = RecordState{Schema: 1, LastAttempt: now, LastSuccess: now, Generation: generation, NodeCount: len(nodes), ProtocolCounts: counts}
-				itemErr = writeRecordState(a.Config.Dir, record.ID, state)
+				itemErr = a.saveRecordState(record.ID, state)
 			}
 		}
 		if itemErr != nil {
 			state.Schema, state.LastAttempt, state.LastError = 1, now, safeCategory(itemErr, "cache")
-			_ = writeRecordState(a.Config.Dir, record.ID, state)
+			_ = a.saveRecordState(record.ID, state)
 			failures++
 			a.printf("✗ %s [%s]: %s\n", record.Name, state.LastError, itemErr)
 		} else {
@@ -467,7 +502,7 @@ func (a *App) SubscriptionMigrate(sourcePath, rawURL, name string) int {
 		err = model.NewError("credential", "Subscription URL could not be recovered; use --url", nil)
 	}
 	if err == nil {
-		err = (backend.SingBox{Binary: a.Config.SingBox}).ValidateNodes(nodes, a.Config.Port)
+		err = a.validateWithSingBox(nodes)
 	}
 	if err != nil {
 		a.printf("Migration failed [%s]: %s\n", safeCategory(err, "migration"), err)
@@ -490,11 +525,11 @@ func (a *App) SubscriptionMigrate(sourcePath, rawURL, name string) int {
 	}
 	var generation string
 	if err == nil {
-		generation, err = store.NewGenerationStore(subscriptionRoot(a.Config.Dir, record.ID)).Publish(source, nodes)
+		generation, err = a.publishGeneration(subscriptionRoot(a.Config.Dir, record.ID), source, nodes)
 	}
 	if err == nil {
 		now := time.Now().UTC().Format(time.RFC3339Nano)
-		err = writeRecordState(a.Config.Dir, record.ID, RecordState{Schema: 1, LastAttempt: now, LastSuccess: now, Generation: generation, NodeCount: 44, ProtocolCounts: counts})
+		err = a.saveRecordState(record.ID, RecordState{Schema: 1, LastAttempt: now, LastSuccess: now, Generation: generation, NodeCount: 44, ProtocolCounts: counts})
 	}
 	if err == nil {
 		err = registry.Save()
