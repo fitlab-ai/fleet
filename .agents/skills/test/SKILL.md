@@ -7,52 +7,41 @@ description: >
 
 # 执行测试
 
-执行项目的完整测试流程，包括编译检查和单元测试。
+执行项目的完整 Go 验证流程，包括构建、静态检查、单元测试和竞态检测。
 
-## 1. 编译 / 类型检查
-
-本项目由 Node.js CLI 和模板文件组成，无需编译。跳过此步骤。
-
-## 2. 运行单元测试（按层级选择）
-
-本项目把测试分为三层，按场景选择运行命令；新增测试文件默认归入 **full**，确认足够快且足够核心后，再上调到 core 或 smoke。
-
-### smoke（目标 <5s）
+## 1. 构建
 
 ```bash
-npm run test:smoke
+go build -trimpath -o dist/fleet ./cmd/fleet
 ```
 
-适用场景：
-- code-task 内循环
-- 保存即跑 / 频繁反馈
-- 仅断言项目结构、配置、模板契约
+确认 CLI 构建成功。`dist/fleet` 是本地生成产物，不应提交。
 
-### core（目标 <15s）
+## 2. 静态检查
 
 ```bash
-npm run test:core
+go vet ./...
 ```
 
-适用场景：
-- pre-commit hook（自动调用）
-- 写 code.md / code-r{N}.md 报告前的最终验证
-- 推送 PR 前的本地把关
+确认所有 Go package 均通过静态检查。
 
-### full（目标 <60s）
+## 3. 运行测试
+
+先运行完整测试：
 
 ```bash
-npm test
+go test ./...
 ```
 
-适用场景：
-- release / tag 前
-- CI（unit-tests.yml）
-- main 合并前的最终把关
+再使用竞态检测器复核：
 
-full 层运行全部项目测试。`npm test` 使用通配匹配项目测试文件，**新增的测试文件会自动归入 full**，这是安全网。
+```bash
+go test -race ./...
+```
 
-## 3. 输出结果
+`go test ./...` 自动覆盖仓库内所有 Go package，包括 `tests/compat`。新增的 `*_test.go` 文件只要位于模块 package 中，就会被完整测试命令纳入。
+
+## 4. 输出结果
 
 报告测试结果摘要：
 - 运行的总测试数

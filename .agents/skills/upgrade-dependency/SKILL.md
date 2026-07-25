@@ -7,9 +7,7 @@ description: >
 
 # 升级依赖
 
-将依赖包升级到指定版本，并进行构建和测试验证。
-
-<!-- TODO: 根据你的项目包管理器调整以下命令 -->
+升级 `go.mod` 中的 Go module，并进行整理、构建和测试验证。
 
 ## 执行流程
 
@@ -19,39 +17,39 @@ description: >
 
 ### 2. 查找依赖位置
 
-在依赖文件中搜索目标包：
-- `package.json`（Node.js）
-- `pom.xml`（Maven）
-- `requirements.txt` / `pyproject.toml`（Python）
-- `go.mod`（Go）
-- 其他项目特定的依赖文件
+在 `go.mod` 中确认目标 module 及当前版本，并检查 `go.sum` 中对应的校验记录。
 
 ### 3. 更新版本
 
-在依赖文件中更新版本号。
+使用 Go 工具链更新指定 module：
 
-### 4. 安装依赖
-
-<!-- TODO: 替换为你的项目安装命令 -->
 ```bash
-# npm install          (Node.js)
-# mvn clean install    (Maven)
-# pip install -r requirements.txt  (Python)
-# go mod tidy          (Go)
+go get {module}@{version}
 ```
+
+不得手工只修改 `go.mod` 中的版本字符串；让 Go 同步依赖图和 `go.sum`。
+
+### 4. 整理依赖
+
+```bash
+go mod tidy
+```
+
+检查 `go.mod` 和 `go.sum` 的 diff，确认没有无关 module 变化。
 
 ### 5. 验证构建
 
-<!-- TODO: 替换为你的项目构建命令 -->
 ```bash
-# npm run build        (Node.js)
-# mvn compile          (Maven)
-# make build           (通用)
+go build -trimpath -o dist/fleet ./cmd/fleet
+go vet ./...
 ```
 
 ### 6. 运行测试
 
-执行项目的测试命令。参考 test 技能获取项目特定的测试命令。
+```bash
+go test ./...
+go test -race ./...
+```
 
 ### 7. 输出结果
 
@@ -77,8 +75,8 @@ description: >
 1. **禁止自动提交**：不要自动提交变更
 2. **主版本升级**：警告潜在的破坏性变更
 3. **测试失败**：报告失败详情并等待用户决定
-4. **锁文件**：如果项目使用锁文件（package-lock.json、yarn.lock 等），确保一并更新
-5. **传递依赖**：注意升级是否影响传递依赖
+4. **校验文件**：必须让 `go mod tidy` 同步 `go.sum`
+5. **传递依赖**：检查 indirect module 是否发生预期外变化
 
 ## 错误处理
 

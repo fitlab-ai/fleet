@@ -7,34 +7,33 @@ description: >
 
 # 运行集成测试
 
-执行项目的集成测试流程，进行端到端验证。
-
-<!-- TODO: 将以下命令替换为你的项目实际命令 -->
+执行 Fleet 的 Go 兼容性测试流程，验证迁移后的 CLI 行为契约。
 
 ## 1. 验证构建产物
 
-在运行集成测试前确保项目已构建。
+先构建 CLI：
 
 ```bash
-# TODO: 替换为你的项目构建验证命令
-# ls build/              (检查构建输出是否存在)
-# npm run build          (Node.js)
-# mvn package -DskipTests  (Maven)
+go build -trimpath -o dist/fleet ./cmd/fleet
 ```
 
-如果构建产物不存在，提示用户先执行 test 技能。
+如果构建失败，停止并报告错误。
 
-## 2. 运行集成测试
+## 2. 运行兼容性测试
 
 ```bash
-# TODO: 替换为你的项目集成测试命令
-# npm run test:integration    (Node.js)
-# mvn verify                  (Maven)
-# pytest tests/integration/   (Python)
-# go test -tags=integration ./...  (Go)
+go test ./tests/compat/...
 ```
 
-## 3. 输出结果
+该 package 验证 Go 实现与迁移兼容性矩阵保持一致。不得直接执行遗留测试源文件。
+
+## 3. 运行完整竞态测试
+
+```bash
+go test -race ./...
+```
+
+## 4. 输出结果
 
 报告结果：
 - 运行/通过/失败的测试数
@@ -63,7 +62,7 @@ description: >
 
 ## 注意事项
 
-1. **前置条件**：通常需要先成功构建（执行 test 技能）
-2. **环境**：集成测试可能需要外部服务（数据库、API 等）
-3. **超时**：集成测试通常耗时较长；请耐心等待
-4. **清理**：确保测试完成后清理测试环境
+1. **前置条件**：必须先成功构建 Fleet CLI
+2. **技术栈**：只执行 Go 构建和 Go 测试命令
+3. **兼容性矩阵**：`tests/compat` 是迁移兼容性验证入口
+4. **清理**：测试完成后不要提交 `dist/fleet`

@@ -11,14 +11,20 @@
 当正向断言已覆盖期望行为，就不要再为"反面不应出现"补一条反向断言。
 
 ❌ 反例：
-```ts
-assert.match(content, /^name: code-task$/m);         // 正向已覆盖期望值
-assert.doesNotMatch(content, /^name: wrong-name$/m); // 多余：永久记住一个不该出现的值
+```go
+if got != want {
+	t.Fatalf("got %q, want %q", got, want)
+}
+if got == "legacy-value" {
+	t.Fatal("legacy value must not appear") // 多余：永久记住一个已删除值
+}
 ```
 
 ✅ 正例：
-```ts
-assert.match(content, /^name: code-task$/m);         // 正向断言已足够
+```go
+if got != want {
+	t.Fatalf("got %q, want %q", got, want)
+}
 ```
 
 正向断言通过即证明值正确；额外的反向断言不增加保护，只增加维护成本，并会在功能删除后退化为"测试永久记住一个不再存在的概念"。
@@ -45,46 +51,21 @@ assert.match(content, /^name: code-task$/m);         // 正向断言已足够
 
 如果项目没有定义分层测试套件，RED 与 GREEN 验证都使用项目的完整测试命令。不要在无关改动中自行引入测试层级或覆盖率门禁。
 
+### Go 项目约定
+
+- 测试文件与被测 package 放在同一目录，命名为 `*_test.go`。
+- 跨 package 的迁移兼容性检查放在 `tests/compat`。
+- 默认完整验证使用 `go test ./...`；涉及并发、生命周期、代理或文件状态时追加 `go test -race ./...`。
+- 静态检查使用 `go vet ./...`，构建验证使用 `go build -trimpath -o dist/fleet ./cmd/fleet`。
+- 不执行遗留测试源文件；它们只可作为迁移兼容性矩阵的数据来源，直到迁移清理任务明确删除。
+
 ### 覆盖率定位（信息层）
 
-> CI 中通过 `node --test --experimental-test-coverage` 输出覆盖率，仅作为"哪些文件被测试薄弱"的提示，**不作为 merge gate**。
-
-#### 本地运行
+需要定位未覆盖代码时可运行：
 
 ```bash
-npm run test:coverage
+go test -coverprofile=coverage.out ./...
+go tool cover -func=coverage.out
 ```
 
-stdout 末尾会打印按文件粒度的行 / 分支 / 函数覆盖率以及未覆盖行号。
-
-#### CI 展示
-
-`.github/workflows/unit-tests.yml` 在 ubuntu-latest 分片上把覆盖率块写入 GitHub Actions 的 step summary（PR Checks 页可见）。Windows / macOS 分片不重复输出。
-
-README 顶部的 Codecov 徽章由 `.github/workflows/unit-tests.yml` 在 ubuntu-latest 分片上传 `coverage.lcov` 后由 Codecov 生成。
-
-#### 边界
-
-- **不设置百分比阈值**：`--test-coverage-lines/branches/functions` 等阈值参数禁止加入；Goodhart's law 提醒我们一旦把覆盖率作为指标，开发者会写"覆盖率友好但行为弱"的测试。
-- **第三方服务仅用于徽章**：已接入 Codecov 托管 README 覆盖率徽章，但通过根 `codecov.yml` 显式关闭其 project/patch status check 与 PR 评论——Codecov 在本项目只展示数字，不参与 merge 决策。不接入 coveralls 等其他服务。
-- **不区分 tier**：当前只对 full `test` tier 输出覆盖率；smoke / core tier 的覆盖率没有独立价值。
-- **不阻塞 PR**：CI 步骤 `continue-on-error: true`，即便覆盖率采集失败也不影响 merge。
-
-#### 新测试该放哪一层
-
-测试文件放入哪一层决定它会被哪些 npm script 自动执行：
-
-- `tests/unit/<module>/`：快速、结构性或纯函数类测试；不启动真实 CLI 子进程，不依赖外部工具，适合 `test:smoke`。
-- `tests/integration/<module>/`：会组合多个模块、运行 CLI 子进程、触达临时文件系统或验证模板同步流程，但仍应保持稳定和相对快速，适合 `test:core`。
-- `tests/e2e/<module>/`：较慢的契约、平台同步、打包产物、跨进程或端到端流程测试，只在完整 `npm test` 中运行。
-
-模块继续作为第二级目录（如 `cli`、`core`、`scripts`、`templates`）。共享 helper 和 fixtures 保持在 `tests/helpers/`、`tests/helpers.ts`、`tests/fixtures/`，不要放入任一 tier。
-
-#### 与"测试 tier 覆盖"的关系
-
-注意区分两个概念：
-
-- **测试 tier 覆盖**（`tests/unit/core/test-tier-coverage.test.ts` 校验测试文件目录归属与 npm script tier 映射）：管的是"哪些测试文件被纳入哪一 tier"，与代码行覆盖率正交。
-- **代码行覆盖率**（本节）：管的是"业务源码哪些行被测试触达"。
-
-两者目的不同，不要相互替代。
+覆盖率用于发现薄弱区域，不作为单独的合并门禁。`coverage.out` 是本地产物，不应提交。
