@@ -13,7 +13,6 @@
  * Output: JSON report to stdout.
  */
 
-import childProcess from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -69,6 +68,7 @@ const DEFAULTS = {
       ".claude/commands/",
       ".codex/hooks.json",
       ".gemini/commands/",
+      ".git-hooks/check-large-files.cjs",
       ".git-hooks/check-version-format.sh",
       ".github/scripts/",
       ".github/workflows/metadata-sync.yml",
@@ -106,7 +106,7 @@ const AGENT_INFRA_SANDBOX_TOOL = 'agent-infra';
 const LEGACY_DEFAULT_SANDBOX_TOOLS = ['claude-code', 'codex', 'gemini-cli', 'opencode'];
 const DEFAULT_SANDBOX_TOOLS = [AGENT_INFRA_SANDBOX_TOOL, ...LEGACY_DEFAULT_SANDBOX_TOOLS];
 // Add a new identifier here only after shipping matching .{platform}. template variants.
-const KNOWN_PLATFORMS = new Set(['github']);
+const KNOWN_PLATFORMS = new Set(['github', 'none']);
 const KNOWN_LANGUAGES = new Set(['en', 'zh-CN']);
 
 // Single source of truth for built-in TUI ids and owned path prefixes.
@@ -870,14 +870,6 @@ function isBinary(fp) {
   return false;
 }
 
-function gitUrl(dir) {
-  try {
-    return childProcess.execSync('git remote get-url origin', {
-      cwd: dir, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe']
-    }).trim();
-  } catch { return null; }
-}
-
 function langSelect(rels, lang, allSet, project) {
   const sel = new Map();
 
@@ -1020,8 +1012,7 @@ function syncTemplates(projectRoot, templateRootOverride) {
     },
     ejected: { created: [], skipped: [] },
     merged:  { pending: [] },
-    configUpdated: false,
-    selfUpdate: false
+    configUpdated: false
   };
   const customTUIs = validateCustomTUIs(projectRoot, customTUIsConfig, report);
   const customTUICommandTargets = buildCustomTUICommandTargets(
@@ -1364,9 +1355,6 @@ function syncTemplates(projectRoot, templateRootOverride) {
   report.merged.pending = [...mergedMap].map(
     ([target, template]) => ({ target, template })
   );
-
-  const projUrl = gitUrl(projectRoot);
-  report.selfUpdate = !!(projUrl && /fitlab-ai\/agent-infra/.test(projUrl));
 
   const hasChanges = (
     report.managed.written.length +

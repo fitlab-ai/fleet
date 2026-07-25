@@ -65,9 +65,9 @@ example-single-layer: "feat: add A: B" => "add A: B"
 - 如果找到，**默认复用现有任务**（场景 A），不询问用户；在最终告知中明确「已复用现有任务 `{task-id}`，未重新导入」。若用户希望重新导入，需要先手动归档/删除已有任务再次执行本技能
 - 如果未找到，继续执行 2.2
 
-2.2 按 `.agents/rules/issue-pr-commands.md` 的“历史任务评论扫描”命令扫描 Issue 评论中的同步标记，查找可恢复的历史任务 ID。
+2.2 调用 `agent-infra-internal platform-comment list --issue {issue-number}` 扫描注册 marker，查找可恢复的历史任务 ID。
 
-该命令依赖步骤 1 已设置的 `$upstream_repo`。
+该命令内部解析 upstream、认证与分页。
 
 退出码处理（pipeline 整体）：
 
@@ -142,18 +142,14 @@ date "+%Y-%m-%d %H:%M:%S%z" | sed 's/\([+-][0-9][0-9]\)\([0-9][0-9]\)$/\1:\2/'
   ```
   如果步骤 3.3 已经按恢复场景追加了 Activity Log，不要重复追加同义记录。
 
-### 5. 分配 Issue Assignee
-
-如果 task.md 中存在有效的 `issue_number`，按 `.agents/rules/issue-pr-commands.md` 的 Issue 更新命令为当前执行者添加 assignee；Assignee 同步的边界仍遵循 `.agents/rules/issue-sync.md`。
-
-### 6. 同步到 Issue
+### 5. 绑定并同步 Issue
 
 如果 task.md 中存在有效的 `issue_number`，执行以下同步操作（任一失败则跳过并继续）：
-- 执行前先读取 `.agents/rules/issue-sync.md`，完成 upstream 仓库检测和权限检测
-- 检查 Issue 当前 milestone；如果未设置，先读取 `.agents/rules/milestone-inference.md`，按其中的「阶段 1：`create-task`（平台规则创建 Issue 时）」推断版本线，并按其「`import-issue` 调用时的兜底」子节执行远端回写；推断失败、权限不足或回写失败均跳过并继续，不阻断导入
-- 所有场景结束后，必须执行一次 task 留言同步，创建或更新 `.agents/rules/issue-sync.md` 中定义的 task 评论标记，确保远端 `:task` 评论存在且内容与本地 `task.md` 一致（按 issue-sync.md 的 task.md 评论同步规则）
+- 调用 `agent-infra-internal platform-issue bind {task-id} --issue {issue-number} --agent {agent}` 校验并原子绑定
+- 调用 `agent-infra-internal platform-issue sync {task-id} --agent {agent} --assignees current --milestone initial`
+- 所有场景结束后，必须调用 `agent-infra-internal platform-comment sync {task-id} --kind task --agent {agent}`
 
-### 7. 完成校验
+### 6. 完成校验
 
 **先调用短号分配**（保证注册表 entry 已分配；完成校验阶段会读取）：
 
@@ -166,7 +162,7 @@ node .agents/scripts/task-short-id.js alloc "$task_id"
 运行完成校验，确认任务产物和同步状态符合规范：
 
 ```bash
-node .agents/scripts/validate-artifact.js gate import-issue .agents/workspace/active/{task-id} --format text
+agent-infra-internal task-verify {task-id} import-issue.completed --format text
 ```
 
 处理结果：
@@ -176,11 +172,11 @@ node .agents/scripts/validate-artifact.js gate import-issue .agents/workspace/ac
 
 将校验输出保留在回复中作为当次验证输出。没有当次校验输出，不得声明完成。
 
-### 8. 告知用户
+### 7. 告知用户
 
 > 仅在校验通过后执行本步骤。
 
-> **重要**：以下「下一步」中列出的所有 TUI 命令格式必须完整输出，不要只展示当前 AI 代理对应的格式。如果 `.agents/.airc.json` 中配置了自定义 TUI（`customTUIs`），读取每个工具的 `name` 和 `invoke`，按同样格式补充对应命令行（`${skillName}` 替换为技能名，`${projectName}` 替换为项目名）。 渲染最终输出前，先读取 `.agents/rules/next-step-output.md` 并落实其两类规则：(1) 「下一步」命令把 `{task-ref}` 渲染为短号 `#NN`（未分配/已释放时回退完整 TASK-id）；(2) 在面向用户输出的绝对最后一行追加 `Completed at` 收尾行（成功、错误、早退等任何面向用户输出都适用，不限于校验通过的成功态）。
+> **重要**：以下「下一步」中列出的所有 TUI 命令格式必须完整输出，不要只展示当前 AI 代理对应的格式。如果 `.agents/.airc.json` 中配置了自定义 TUI（`customTUIs`），读取每个工具的 `name` 和 `invoke`，按同样格式补充对应命令行（`${skillName}` 替换为技能名，`${projectName}` 替换为项目名）。 渲染最终输出前，先读取 `.agents/rules/next-step-output.md` 并落实其两类规则：(1) 「下一步」命令把 `{task-ref}` 渲染为短号 `NN`（未分配/已释放时回退完整 TASK-id）；(2) 在面向用户输出的绝对最后一行追加 `Completed at` 收尾行（成功、错误、早退等任何面向用户输出都适用，不限于校验通过的成功态）。
 
 ```
 Issue #{number} 已导入。

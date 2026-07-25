@@ -3,17 +3,18 @@ name: code-task
 description: >
   根据技术方案编码任务并输出报告。
   当技术方案已批准需要落地实现，或代码审查发现问题需要修复时使用。
+  仅当对话包含可解析的任务引用时才可自动调用本技能。
 ---
 
 # 编码任务
 
-根据已批准的技术方案编码任务，并产出 `code.md` 或 `code-r{N}.md`。本技能支持初次实现和基于 `review-code` 反馈的修复双模式。
+根据已批准的技术方案编码任务，并产出 `code.md` 或 `code-r{N}.md`。本技能支持初次实现、基于 `review-code` 反馈的修复，以及人工裁决驱动实现三种模式。
 
 ## 行为边界 / 关键规则
 
 - 严格遵循最新方案产物：`plan.md` 或 `plan-r{N}.md`
 - 修复模式逐条核实最新 `review-code` 的发现：成立则修复，判定为不成立/幻觉则在报告中反驳并记入 unresolved；不擅自扩大到审查未列出的问题；manual-validation 项不在修复范围
-- 实现中遇到方案未覆盖的关键设计决策时，按 `.agents/rules/no-mid-flow-questions.md` 判据，把详情块写入实现报告的 `## 人工裁决待办` 段 `### HD-N：<标题> [needs-human-decision]`（`HD-N` 全局唯一，见 `.agents/rules/review-handshake.md`）并回写 `HD-` 账本行，不中途提问或擅自扩范围
+- 实现中遇到方案未覆盖的关键设计决策时，先调用 `agent-infra-internal task-ledger {task-id} decision-next-id` 取得 `HD-N`，按 `.agents/rules/human-decision-context.md` 写入实现报告的 `## 人工裁决待办` 详情块，再调用 `decision-upsert --id {HD-N} --stage code --artifact {code-artifact}`；不得扫描编号、手写账本行、中途提问或擅自扩范围
 - 绝不自动执行 `git add` 或 `git commit`
 - 每轮实现都创建新的实现产物，不覆盖旧文件
 - 执行本技能后，你**必须**立即更新 task.md
@@ -39,26 +40,20 @@ description: >
 运行以下命令，并把原文粘贴到回复正文和本轮产物的 `## 状态核对` 段：
 
 ```bash
-git status -s
-ls -la .agents/workspace/active/{task-id}/
-tail .agents/workspace/active/{task-id}/task.md
+agent-infra-internal task-snapshot {task-id} --format text
 ```
 
 状态核对完成前，禁止任何关于外部状态的断言（例如“代码没变”“测试已通过”“没有其他引用”），包括思考阶段。本门禁只提供结构下限；逐条证据配对和真实性仍需按报告模板与审查要求核对。
 
-## 任务入参短号别名
+## 任务上下文解析
 
-> 如果 `{task-id}` 入参匹配 `^[#]?[0-9]+$`（裸数字或带 `#` 前缀），先读取 `.agents/rules/task-short-id.md` 的「SKILL 入参解析」段执行解析；后续命令视 `{task-id}` 为解析后的全长 `TASK-YYYYMMDD-HHMMSS` 形式。
+> 入口允许省略 task ref，也接受旧位置 task ref 或 `--task <ref>` / `-t <ref>`。先从完整参数中分离 task scope 并原样保留其他业务操作数，再调用 `agent-infra-internal task-context resolve {task-scope}`；`{task-scope}` 为空、位置 ref 或 task flag 之一。只读取结构化结果的 `taskId`，后续把 `{task-id}` 绑定为该完整 `TASK-YYYYMMDD-HHMMSS`。解析失败时透传非零退出码，不自行扫描任务。
 
-## 步骤开始：写入 started 标记
+> 解析任务引用，并确认任务位于本技能支持的状态或目录且存在 `task.md`；无法定位时按未找到任务处理并停止。
 
-确认前置条件（步骤 1）与模式/轮次（步骤 4）后、本轮第一个产出动作之前，向 task.md `## 活动日志` 追加一条 started 标记（与本轮 done 条目同基名 + ` [started]` 后缀，note 用 `started`）：
+## 步骤开始：声明 started 事件
 
-```
-- {YYYY-MM-DD HH:mm:ss±HH:MM} — **Code Task (Round {N}) [started]** by {agent} — started
-```
-
-修复模式的基名须与本轮 done 一致，即 `Code Task (Round {N}, fix for {review-artifact}) [started]`。`ai task log` 会把它与步骤完成时（步骤 10）写入的 done 条目配对成一行（进行中 → 已完成）。格式与配对规则见 `.agents/rules/task-management.md` 的「Activity Log started / done 双标记约定」。
+确认前置条件与模式后、本轮第一个产出动作之前执行 `agent-infra-internal task-event {task-id} code.started --agent {agent}`。修复模式追加 `--fix-for {review-artifact}`，裁决模式追加 `--implementation-input {input-id}`。核心根据 artifact context 推导并校验轮次与输入身份；以返回的 `artifactContext` 记录本轮身份。
 
 ## 执行步骤
 ### 1. 验证前置条件
@@ -84,16 +79,16 @@ tail .agents/workspace/active/{task-id}/task.md
 
 ### 3. 收窄里程碑
 
-**必须执行，不得跳过。** 如果 task.md 中存在有效的 `issue_number`，执行前先读取 `.agents/rules/issue-sync.md`，完成 upstream 仓库检测和权限检测；再读取 `.agents/rules/milestone-inference.md`，按其中的「阶段 2：`code-task`」收窄 Issue milestone；如果 `has_triage=false`，则保持原 milestone 不变。
+**必须执行，不得跳过。** 如果 task.md 中存在有效的 `issue_number`，调用 `agent-infra-internal platform-issue sync {task-id} --agent {agent} --milestone specific`；里程碑推断、权限降级与幂等写入由 internal core 处理。
 
-> 若此步骤被跳过或收窄后 Issue milestone 仍为 `X.Y.x` 版本线，步骤 11 的 `validate-artifact` gate 会通过 `verify_milestone_specific` 截停本轮 `code-task`，要求重新收窄到具体版本（如 `0.7.1`）后再继续。
+> 若跳过或收窄后仍为 `X.Y.x`，步骤 11 的 `task-verify code.completed` 会通过 typed milestone check 截停本轮。
 
 ### 4. 确定模式与轮次
 
-执行 mode detection 脚本，先保存 exit code 再处理输出：
+执行共享产物查询，先保存 exit code 再处理输出：
 
 ```bash
-result=$(node .agents/skills/code-task/scripts/detect-mode.js .agents/workspace/active/{task-id})
+result=$(agent-infra-internal task-artifact {task-id} inspect --family code)
 status=$?
 echo "$result"
 ```
@@ -104,6 +99,7 @@ echo "$result"
 |---|---|---|
 | 0 | `"init"` | 进入初次实现模式。记录 `{code-artifact}` = `result.next_artifact`、`{code-round}` = `result.next_round` |
 | 0 | `"fix"` | 进入修复模式。记录 `{code-artifact}` = `result.next_artifact`、`{code-round}` = `result.next_round`、`{review-artifact}` = `result.review_artifact` |
+| 0 | `"decision"` | 进入裁决实现模式。记录 `{code-artifact}`、`{code-round}`、`{input-id}`、`{decision-id}` 与 `{decision-evidence}` |
 | 1 | `"refused"` | 输出 `result.message` 给用户；立即停止；不写 Activity Log、不创建产物 |
 | 2 | `"error"` | 输出 `result.message` 给用户；立即停止；不写 Activity Log、不创建产物 |
 | 其他 | 任意 | 视为脚本异常，输出 `Mode detection failed: status={status}, output={result}` 并停止 |
@@ -112,12 +108,7 @@ echo "$result"
 
 ### 5. 确定输入方案
 
-扫描 `.agents/workspace/active/{task-id}/` 并记录：
-- 最高轮次的方案文件为 `{plan-artifact}`
-- 使用步骤 4 记录的 `{code-round}` 与 `{code-artifact}`
-- 若为修复模式，同时记录 `{review-artifact}`
-
-如果存在 `plan-r{N}.md`，读取最高轮次的方案文件；否则读取 `plan.md`。
+只使用步骤 4 的结构化结果：从 `inputs` 取得 `{plan-artifact}`，从 `next_round` / `next_artifact` 取得 `{code-round}` / `{code-artifact}`；修复模式从 `review_artifact` 取得 `{review-artifact}`；裁决模式从 `implementation_input`、`decision_id`、`decision_evidence` 取得统一输入身份。不得自行扫描轮次或拼装文件名。
 
 ### 6. 阅读技术方案
 
@@ -128,6 +119,8 @@ echo "$result"
 - 约束、风险与已批准的取舍
 
 修复模式还必须读取 `{review-artifact}`，并只处理其中标记的问题。
+
+裁决模式还必须读取 task.md 中 `{input-id}` 对应行及 `{decision-evidence}` 指向的裁决记录，并只实现该裁决要求的行为变化。
 
 ### 7. 执行代码实现
 
@@ -153,34 +146,25 @@ echo "$result"
 
 ### 10. 更新任务状态
 
-获取当前时间：
-
-```bash
-date "+%Y-%m-%d %H:%M:%S%z" | sed 's/\([+-][0-9][0-9]\)\([0-9][0-9]\)$/\1:\2/'
-```
-
 更新 `.agents/workspace/active/{task-id}/task.md`：
-- `current_step`：code
-- `assigned_to`：{当前代理}
-- `updated_at`：{当前时间}
-- `agent_infra_version`：按 `.agents/rules/version-stamp.md` 取值
 - 审查 `## 需求` 段落，仅把本轮已由代码实现且有测试通过支撑的条目从 `- [ ]` 勾为 `- [x]`
-- 记录 Round `{code-round}` 的 `{code-artifact}`
-- 追加：
-  - 初次实现：`- {YYYY-MM-DD HH:mm:ss±HH:MM} — **Code Task (Round {N})** by {agent} — Code implemented, {n} files modified, {n} tests passed → {code-artifact}`
-  - 修复模式：`- {YYYY-MM-DD HH:mm:ss±HH:MM} — **Code Task (Round {N}, fix for {review-artifact})** by {agent} — Fixed {n} blockers, {n} major, {n} minor issues[, skipped {n} manual-validation] → {code-artifact}`
+- 产物链接、阶段与完成日志由 completed 事件统一登记
+- 完成业务内容更新后声明完成事件：
+  - 初次实现：`agent-infra-internal task-event {task-id} code.completed --agent {agent} --artifact {code-artifact} --files-modified {n} --tests-passed {n}`
+  - 修复模式：`agent-infra-internal task-event {task-id} code.completed --agent {agent} --artifact {code-artifact} --fix-for {review-artifact} --blockers {n} --major {n} --minor {n} --manual-validation {n}`
+  - 裁决模式：`agent-infra-internal task-event {task-id} code.completed --agent {agent} --artifact {code-artifact} --implementation-input {input-id} --files-modified {n} --tests-passed {n}`
 
-如果 task.md 中存在有效的 `issue_number`，执行以下同步操作（任一失败则跳过并继续；执行前先读取 `.agents/rules/issue-sync.md`，完成 upstream 仓库检测和权限检测）：
-- 按 issue-sync.md 设置 `status: in-progress`
-- 创建或更新 `.agents/rules/issue-sync.md` 中定义的 task 评论标记（按 issue-sync.md 的 task.md 评论同步规则）
-- 发布 `{code-artifact}` 评论
+如果 task.md 中存在有效的 `issue_number`，执行以下同步操作（任一失败则记录 warning 并继续；Issue 元数据边界仍见 `.agents/rules/issue-sync.md`）：
+- 调用 `agent-infra-internal platform-issue sync {task-id} --agent {agent} --status in-progress`
+- 调用 `agent-infra-internal platform-comment sync {task-id} --kind task --agent {agent}`
+- 调用 `agent-infra-internal platform-comment sync {task-id} --kind artifact --artifact {code-artifact} --agent {agent}`
 
 ### 11. 完成校验
 
 运行完成校验，确认任务产物和同步状态符合规范：
 
 ```bash
-node .agents/scripts/validate-artifact.js gate code-task .agents/workspace/active/{task-id} {code-artifact} --format text
+agent-infra-internal task-verify {task-id} code.completed --artifact {code-artifact} --format text
 ```
 
 处理结果：
@@ -196,7 +180,7 @@ node .agents/scripts/validate-artifact.js gate code-task .agents/workspace/activ
 
 > **重要**：以下「下一步」中列出的所有 TUI 命令格式必须完整输出，不要只展示当前 AI 代理对应的格式。如果 `.agents/.airc.json` 中配置了自定义 TUI（`customTUIs`），读取每个工具的 `name` 和 `invoke`，按同样格式补充对应命令行（`${skillName}` 替换为技能名，`${projectName}` 替换为项目名）。输出格式见 `reference/output-template.md`；修复模式输出见 `reference/fix-mode.md`。
 
-> 渲染最终输出前先读取 `.agents/rules/next-step-output.md` 并落实其两类规则：(1) 「下一步」命令的 `{task-ref}` 渲染为当前任务短号 `#NN`（取值与回退见该文件），其他 `{task-id}` 占位（报告标题、路径）保持完整 TASK-id 形式；(2) 在面向用户输出的绝对最后一行追加 `Completed at` 收尾行（成功、错误、早退等任何面向用户输出都适用，不限于校验通过的成功态）。
+> 渲染最终输出前先读取 `.agents/rules/next-step-output.md` 并落实其两类规则：(1) 「下一步」命令的 `{task-ref}` 渲染为当前任务短号 `NN`（取值与回退见该文件），其他 `{task-id}` 占位（报告标题、路径）保持完整 TASK-id 形式；(2) 在面向用户输出的绝对最后一行追加 `Completed at` 收尾行（成功、错误、早退等任何面向用户输出都适用，不限于校验通过的成功态）。
 
 ## 完成检查清单
 

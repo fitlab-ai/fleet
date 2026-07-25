@@ -13,15 +13,9 @@ description: >
 
 > 如果 `{task-id}` 入参匹配 `^[#]?[0-9]+$`（裸数字或带 `#` 前缀），先读取 `.agents/rules/task-short-id.md` 的「SKILL 入参解析」段执行解析；后续命令视 `{task-id}` 为解析后的全长 `TASK-YYYYMMDD-HHMMSS` 形式。
 
-## 步骤开始：写入 started 标记
+## 步骤开始：本地生命周期边界
 
-确认前置条件后、本步骤第一个产出动作之前，向 task.md `## 活动日志` 追加一条 started 标记（与本步骤 done 条目同基名 + ` [started]` 后缀，note 用 `started`）：
-
-```
-- {YYYY-MM-DD HH:mm:ss±HH:MM} — **Close Dependabot [started]** by {agent} — started
-```
-
-`ai task log` 会把它与完成时写入的 done 条目配对成一行（进行中 → 已完成）。约定见 `.agents/rules/task-management.md` 的「Activity Log started / done 双标记约定」。
+安全告警 API 仍由本技能处理；若存在关联任务，步骤 7 只声明一个本地 lifecycle intent，由核心统一提交基础元数据、日志、归档目录和短号。
 
 ## 执行流程
 
@@ -93,27 +87,17 @@ CVE：{cve-id}
 ### 7. 记录到任务（如存在）
 
 如果有关联任务（搜索 `security_alert_number: <alert-number>`）：
-获取当前时间：
 
 ```bash
-date "+%Y-%m-%d %H:%M:%S%z" | sed 's/\([+-][0-9][0-9]\)\([0-9][0-9]\)$/\1:\2/'
+agent-infra-internal task-lifecycle {task-id} close-dependabot --agent {agent} \
+  --alert-number {alert-number} --reason "{reason}"
 ```
 
-- 添加关闭记录到 task.md
-- **追加**到 `## Activity Log`（不要覆盖之前的记录）：
-  ```
-  - {YYYY-MM-DD HH:mm:ss±HH:MM} — **Close Dependabot** by {agent} — Dependabot alert #{alert-number} dismissed: {reason}
-  ```
-- 归档任务
-- **释放短号**（归档目录已 mv 成功，再 release；脚本幂等）：
-
-  ```bash
-  node .agents/scripts/task-short-id.js release "$task_id" || true
-  ```
+仅 `status=applied|no-op` 视为本地归档完成。若 API 已关闭但 lifecycle 返回 `failed`，必须明确报告“远端已关闭、本地待恢复”，展示 recovery steps，并以同一 intent 重试；不得手工更新 task.md、移动目录或释放短号。
 
 ### 8. 告知用户
 
-> **重要**：以下「下一步」中列出的所有 TUI 命令格式必须完整输出，不要只展示当前 AI 代理对应的格式。如果 `.agents/.airc.json` 中配置了自定义 TUI（`customTUIs`），读取每个工具的 `name` 和 `invoke`，按同样格式补充对应命令行（`${skillName}` 替换为技能名，`${projectName}` 替换为项目名）。 渲染最终输出前，先读取 `.agents/rules/next-step-output.md` 并落实其两类规则：(1) 「下一步」命令把 `{task-ref}` 渲染为短号 `#NN`（未分配/已释放时回退完整 TASK-id）；(2) 在面向用户输出的绝对最后一行追加 `Completed at` 收尾行（成功、错误、早退等任何面向用户输出都适用，不限于校验通过的成功态）。
+> **重要**：以下「下一步」中列出的所有 TUI 命令格式必须完整输出，不要只展示当前 AI 代理对应的格式。如果 `.agents/.airc.json` 中配置了自定义 TUI（`customTUIs`），读取每个工具的 `name` 和 `invoke`，按同样格式补充对应命令行（`${skillName}` 替换为技能名，`${projectName}` 替换为项目名）。 渲染最终输出前，先读取 `.agents/rules/next-step-output.md` 并落实其两类规则：(1) 「下一步」命令把 `{task-ref}` 渲染为短号 `NN`（未分配/已释放时回退完整 TASK-id）；(2) 在面向用户输出的绝对最后一行追加 `Completed at` 收尾行（成功、错误、早退等任何面向用户输出都适用，不限于校验通过的成功态）。
 
 > **可选沙箱清理提示（门控渲染）**：仅当同时满足 (1) `.agents/.airc.json` 存在 `sandbox` 字段、(2) 第 7 步按告警号定位到了关联任务、(3) 该关联任务 task.md 的 `branch` 字段存在且不是 `main` / `master` 时，才渲染下方输出中「注意：…」之后、「下一步」之前的「可选：清理本任务的沙箱」块；任一不满足则整段省略。`{branch}` 取第 7 步定位到的关联任务 task.md 的 `branch` 值。该块独立于「下一步」语义。
 
@@ -153,5 +137,3 @@ ai sandbox rm {branch}
 - 已关闭：提示 "Alert #{number} is already {state}"
 - 权限错误：提示 "No permission to modify alerts"
 - 用户取消：提示 "Cancellation acknowledged"
-
-

@@ -19,9 +19,11 @@ description: >
 | 「`git add -A` 更省事」 | 禁止 `git add -A`/`git add .`；只暂存明确列出的文件，避免带入无关改动。 |
 | 「改了带版权头的文件，年份先不动」 | 改了就更新版权年份（动态取 `date +%Y`），这是提交前的硬性检查。 |
 
-## 任务入参短号别名
+## 任务上下文解析
 
-> 如果 `{task-id}` 入参匹配 `^[#]?[0-9]+$`（裸数字或带 `#` 前缀），先读取 `.agents/rules/task-short-id.md` 的「SKILL 入参解析」段执行解析；后续命令视 `{task-id}` 为解析后的全长 `TASK-YYYYMMDD-HHMMSS` 形式。
+> 入口允许省略 task ref，也接受旧位置 task ref 或 `--task <ref>` / `-t <ref>`。先从完整参数中分离 task scope 并原样保留其他业务操作数，再调用 `agent-infra-internal task-context resolve {task-scope}`；`{task-scope}` 为空、位置 ref 或 task flag 之一。只读取结构化结果的 `taskId`，后续把 `{task-id}` 绑定为该完整 `TASK-YYYYMMDD-HHMMSS`。解析失败时透传非零退出码，不自行扫描任务。
+
+未显式指定 task scope 时，只有 `TASK_CONTEXT_NOT_FOUND` 可继续既有纯提交路径；detached HEAD、损坏候选或多匹配属于歧义，必须失败。显式 task scope 解析失败时一律失败。
 
 ## 步骤开始：写入 started 标记
 
@@ -58,7 +60,7 @@ git diff
 
 ## 4. 创建提交
 
-只暂存明确列出的文件，然后执行 `git commit`。
+先判断受限 push-only 场景；否则把 message、显式路径、expected HEAD/tree 写入临时 JSON，并调用 `agent-infra-internal git-workflow commit --input {file}`。core 负责范围、敏感文件、暂存树和幂等校验。
 
 如果本次提交关联任务且存在 `review-code` 产物，在提交前读取最高轮 `review-code` 产物：
 - 若该产物 `总体结论` / `Overall Verdict` 为 Approved，解析 `R`、`F` 与 `审查快照树` / `Reviewed Snapshot Tree`（`T`）
@@ -70,7 +72,7 @@ git diff
 
 ## 5. 推送到已有 PR（按需）
 
-提交完成后，如果当前分支已存在开放的 Pull Request，则把本次提交推送上去让 PR 自动更新；否则保持现状（首次推送仍由 `create-pr` 负责）。本步骤是用户已发起 `commit` 的推送收尾，不新增自动提交，也不在无 PR 时推送；与是否关联任务无关。
+新提交完成或步骤 4 命中 push-only 后，如果当前分支已存在开放的 Pull Request，则把 HEAD 普通推送上去让 PR 自动更新；否则保持现状（首次推送仍由 `create-pr` 负责）。本步骤不创建额外/空 commit，也不在无 PR 时推送；与是否关联任务无关。
 
 > 检测当前分支是否有开放 PR、以及平台认证，统一按 `.agents/rules/issue-pr-commands.md` 执行；该规则不可用或检测失败时，按下方降级处理。
 
@@ -78,9 +80,7 @@ a. 按 `.agents/rules/issue-pr-commands.md` 检测当前分支（head）是否�
 
 b. 命中开放 PR -> 推送当前分支：
 
-```bash
-git push
-```
+通过 `agent-infra-internal git-workflow push --input {file}` 逐 ref 普通推送并复核，禁止 force push。
 
 c. 安全降级（不阻塞已完成的 `git commit`，仅提示用户）：
    - 平台不可用 / 未认证 / 检测失败 / 未命中开放 PR -> 不推送，继续后续步骤。
@@ -96,11 +96,13 @@ c. 安全降级（不阻塞已完成的 `git commit`，仅提示用户）：
 date "+%Y-%m-%d %H:%M:%S%z" | sed 's/\([+-][0-9][0-9]\)\([0-9][0-9]\)$/\1:\2/'
 ```
 
-> 完整的 4 种状态分支、前置条件检查和多 TUI 下一步命令见 `reference/task-status-update.md`。更新任务状态前，先读取 `reference/task-status-update.md`。
+> 完整的 5 种状态分支、前置条件检查和多 TUI 下一步命令见 `reference/task-status-update.md`。更新任务状态前，先读取 `reference/task-status-update.md`。
 
-> **重要**：向用户展示下一步时，必须完整输出所有 TUI 命令格式，并直接使用 `reference/task-status-update.md` 中对应场景的标准模板。如果 `.agents/.airc.json` 中配置了自定义 TUI（`customTUIs`），读取每个工具的 `name` 和 `invoke`，按同样格式补充对应命令行（`${skillName}` 替换为技能名，`${projectName}` 替换为项目名）。 渲染最终输出前，先读取 `.agents/rules/next-step-output.md` 并落实其两类规则：(1) 「下一步」命令把 `{task-ref}` 渲染为短号 `#NN`（未分配/已释放时回退完整 TASK-id）；(2) 在面向用户输出的绝对最后一行追加 `Completed at` 收尾行（成功、错误、早退等任何面向用户输出都适用，不限于校验通过的成功态）。
+> **重要**：向用户展示下一步时，必须完整输出所有 TUI 命令格式，并直接使用 `reference/task-status-update.md` 中对应场景的标准模板。如果 `.agents/.airc.json` 中配置了自定义 TUI（`customTUIs`），读取每个工具的 `name` 和 `invoke`，按同样格式补充对应命令行（`${skillName}` 替换为技能名，`${projectName}` 替换为项目名）。 渲染最终输出前，先读取 `.agents/rules/next-step-output.md` 并落实其两类规则：(1) 「下一步」命令把 `{task-ref}` 渲染为短号 `NN`（未分配/已释放时回退完整 TASK-id）；(2) 在面向用户输出的绝对最后一行追加 `Completed at` 收尾行（成功、错误、早退等任何面向用户输出都适用，不限于校验通过的成功态）。
 
 追加 Commit 的 Activity Log，并且只能选择一个下一步分支：
+- 已有开放 PR 且 push 成功 -> `watch-pr {task-ref}`；该分支优先于最终提交的 `prFlow` 路由
+- push 失败 -> 保持任务 active，只输出推送/同步诊断，不输出 `watch-pr` 或 `complete-task`
 - 最终提交 -> 按 `.agents/.airc.json` 的 `prFlow` 渲染下一步（`disabled` → 单选 `complete-task`；`required` → 单选 `create-pr`；缺省 → 二选一 `create-pr` / `complete-task`），详见 `reference/task-status-update.md` 场景 1
 - 还有后续工作 -> 更新 task.md 后停止
 - 准备审查 -> `review-code {task-id}`
@@ -109,7 +111,7 @@ date "+%Y-%m-%d %H:%M:%S%z" | sed 's/\([+-][0-9][0-9]\)\([0-9][0-9]\)$/\1:\2/'
 
 当 `{task-id}` 存在且 task.md 包含有效 `issue_number` 时，同步 `in:` label 和需求复选框到关联 Issue；否则跳过。
 
-> 触发条件、`in:` label 计算规则和复选框同步流程见 `reference/issue-metadata-sync.md`。执行前先读取该文件。
+> 触发条件与声明式 `platform-issue` 调用见 `reference/issue-metadata-sync.md`。执行前先读取该文件。
 >
 > 如果本步骤会访问代码托管平台，则先按 `.agents/rules/issue-pr-commands.md` 完成前置检测。
 
@@ -130,7 +132,7 @@ date "+%Y-%m-%d %H:%M:%S%z" | sed 's/\([+-][0-9][0-9]\)\([0-9][0-9]\)$/\1:\2/'
 如果本次操作关联了 `{task-id}`，运行完成校验，确认任务元数据和同步状态符合规范；如果没有任务上下文，跳过本步骤。
 
 ```bash
-node .agents/scripts/validate-artifact.js gate commit .agents/workspace/active/{task-id}
+agent-infra-internal task-verify {task-id} commit.completed --format text
 ```
 
 处理结果：

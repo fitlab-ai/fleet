@@ -5,7 +5,7 @@
   "platform": {
     "type": "github"
   },
-  "templateVersion": "v0.8.5",
+  "templateVersion": "v0.9.0",
   "sandbox": {
     "engine": "orbstack",
     "runtimes": [
@@ -50,7 +50,8 @@
       ".opencode/commands/",
       ".github/workflows/metadata-sync.yml",
       ".github/workflows/pr-label.yml",
-      ".github/workflows/status-label.yml"
+      ".github/workflows/status-label.yml",
+      ".git-hooks/check-large-files.cjs"
     ],
     "merged": [
       "**/post-release.*",

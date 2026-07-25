@@ -3,6 +3,7 @@ name: check-task
 description: >
   查看任务的当前状态和进度。
   当想快速查看某个任务当前状态与进度时使用。
+  仅当对话包含可解析的任务引用时才可自动调用本技能。
 ---
 
 # 查看任务状态
@@ -12,9 +13,11 @@ description: >
 - 本技能是**只读**操作 —— 不修改任何文件
 - 机械数据（frontmatter 元数据、产物分组、Git/Platform 状态，以及跨 active、blocked、completed 三目录定位任务）一律委托给确定性的 `ai task status` 命令。本技能只负责 CLI 无法产出的语义层：工作流阶段解读、审查结论解析、下一步建议。
 
-## 任务入参短号别名
+## 任务上下文解析
 
-> 如果 `{task-id}` 入参匹配 `^[#]?[0-9]+$`（裸数字或带 `#` 前缀），先读取 `.agents/rules/task-short-id.md` 的「SKILL 入参解析」段执行解析；后续命令视 `{task-id}` 为解析后的全长 `TASK-YYYYMMDD-HHMMSS` 形式。
+> 入口允许省略 task ref，也接受旧位置 task ref 或 `--task <ref>` / `-t <ref>`。先从完整参数中分离 task scope 并原样保留其他业务操作数，再调用 `agent-infra-internal task-context resolve {task-scope}`；`{task-scope}` 为空、位置 ref 或 task flag 之一。只读取结构化结果的 `taskId`，后续把 `{task-id}` 绑定为该完整 `TASK-YYYYMMDD-HHMMSS`。解析失败时透传非零退出码，不自行扫描任务。
+
+> 解析任务引用，并确认任务位于本技能支持的状态或目录且存在 `task.md`；无法定位时按未找到任务处理并停止。
 
 ## 执行步骤
 
@@ -74,7 +77,7 @@ ai task status {task-id}
 >
 > **特别注意：只要最新审查报告中存在任何问题，就不能使用对应「审查通过」行。必须改用对应「审查有问题」行。**
 >
-> 渲染最终输出前先读取 `.agents/rules/next-step-output.md` 并落实其两类规则：(1) 下方表格中命令的 `{task-ref}` 渲染为短号 `#NN`（未分配/已释放时回退完整 TASK-id）；(2) 在面向用户输出的绝对最后一行追加 `Completed at` 收尾行（成功、错误、早退等任何面向用户输出都适用，不限于校验通过的成功态）。
+> 渲染最终输出前先读取 `.agents/rules/next-step-output.md` 并落实其两类规则：(1) 下方表格中命令的 `{task-ref}` 渲染为短号 `NN`（未分配/已释放时回退完整 TASK-id）；(2) 在面向用户输出的绝对最后一行追加 `Completed at` 收尾行（成功、错误、早退等任何面向用户输出都适用，不限于校验通过的成功态）。
 
 | 当前状态           | Claude Code / OpenCode       | Gemini CLI                               | Codex CLI                    |
 |--------------------|------------------------------|------------------------------------------|------------------------------|

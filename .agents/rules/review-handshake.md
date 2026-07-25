@@ -62,26 +62,29 @@
 - `stage` ∈ `{analysis, plan, code}`（外加保留值 `post-review-commit`，仅用于 post-review 豁免行）。
 - `status` 合法枚举：`open` / `accepted` / `adjusted` / `refuted` / `cannot-judge` / `confirmed` / `needs-human-decision` / `closed` / `human-decided`。
 - **终态集合（gate 放行）**：`{confirmed, closed, human-decided}`；其余为阻塞态。
-- **写入责任**：`review-*` 提 finding → upsert `open` 行；`*-task` 响应 → 改四态并填 `evidence`、`round` +1；下一轮 `review-*` → `confirmed` / 置回 `open` / `needs-human-decision`；执行方修复经下一轮 review 验证通过 → `closed`；人工裁决 → `human-decided`。
+- **同轮 fix-and-close**：仅当检视方在当前审查轮当场修复 `minor` finding 时，可通过 `finding-review` 将该行从 `open` 直接置为 `closed`。此转换不增加 `round`，`evidence` 必须指向当前 review 产物中的修复证据；`blocker` / `major` 不适用。
+- **severity 与推进解耦**：`blocker` / `major` / `minor` 只表示影响大小。任何正式 finding 只要尚未进入终态就阻止当前阶段通过；review 结论、事件计数与下一步必须在全部写入后通过 `task-ledger stage-status --stage {stage}` 从同一语义导出。
+- **非阻塞 advisory**：仅限不影响当前产物完整性、正确性和验收的后续优化。advisory 只写入报告的独立段落，不进入本账本、不进入 finding 计数、不影响 verdict；manual-validation 仍是独立分类。
+- **写入责任**：调用方只提交结构化意图，不扫描编号、不拼表格行、不自行判断机械状态迁移。`review-*` 用 `agent-infra-internal task-ledger {task-id} finding-upsert|finding-review ...`；`*-task` 用 `finding-respond ...`；人工裁决由 `ai decide` 原子完成。核心统一校验并通过一次任务写入提交。
 - **向后兼容**：task.md 无此段时，gate 视为无未决分歧而放行。
 
 ### 执行方自提人工裁决行
 
-当执行方判定某项为需人工裁定的关键设计决策时，必须把详情块（背景 / 选项 / 影响 / 推荐）写入产物的 `## 人工裁决待办` 段，标题形如 `### HD-N：<标题> [needs-human-decision]`，并在 task.md `## 审查分歧账本` upsert 对应 `HD-` 行：
+当执行方判定某项为需人工裁定的关键设计决策时，必须按 `.agents/rules/human-decision-context.md` 把自足详情块写入产物的 `## 人工裁决待办` 段，标题形如 `### HD-N：<标题> [needs-human-decision]`，并在 task.md `## 审查分歧账本` upsert 对应 `HD-` 行：
 
 ```markdown
 | HD-1 | plan | - | decision | needs-human-decision | plan.md#HD-1 |
 ```
 
-- `id`：`HD-N` 编号**全局唯一**。新增行时扫描账本中所有 `HD-(\d+)`，取最大值 + 1（账本无 `HD-` 行则从 `HD-1` 起）；跨 `analysis` / `plan` / `code` 单调递增，**禁止复用**既有编号，避免按 `HD-id` 定位时歧义。
+- `id`：`HD-N` 编号**全局唯一**。先调用 `agent-infra-internal task-ledger {task-id} decision-next-id` 取得 `entityId`，产出稳定标题后调用 `decision-upsert --id {HD-N} --stage {stage} --artifact {artifact}`；不得由模型扫描或分配编号。
 - `stage` 填该决策产生的阶段：`analysis` / `plan` / `code`。
 - `round` 填 `-`，因为它不是 review finding 的握手轮次。
 - `severity` 固定填 `decision`。
 - `status` 初始填 `needs-human-decision`，因此会被现有 gate 阻塞。
 - `evidence` 指向稳定锚点 `<artifact>#HD-N`（如 `plan-r2.md#HD-1`），不依赖易漂移的行号。
-- 人工在 task.md `## 人工裁决` 段记录裁定后，把对应 `HD-` 行翻为 `human-decided`，`evidence` 指向该裁定记录。
+- 人工使用 `ai decide <task-ref> <序号|账本ID> <裁决内容>` 记录裁定；命令把目标行翻为 `human-decided`，并让 `evidence` 指向独立 `HDR-N` 裁定记录。
 
-> 查看：`ai task decisions <task-ref>` 列出全部待裁决项；`ai task decisions <task-ref> <序号|HD-id>` 展开单项详情块。该命令的账本解析与 `ai task log` 共用 `lib/task/ledger.ts`；`.agents/scripts/validate-artifact.js` 的 gate 解析器是独立实现，二者语义须手工保持同步。
+> 查看、裁决与 typed verification 共用 `lib/task/ledger.ts` 的领域语义。
 
 ## post-review commit 门禁（仅 code 阶段）
 

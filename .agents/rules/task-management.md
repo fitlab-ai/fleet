@@ -19,6 +19,13 @@
 - 更新 `agent_infra_version` 前，先读取 `.agents/rules/version-stamp.md`
 - Activity Log 只能追加，不能覆盖历史记录
 
+## 状态快照与完成验证入口
+
+- 运行时 SKILL 需要记录 git、任务目录和 task.md tail 证据时，统一调用 `agent-infra-internal task-snapshot {task-id} --format text`；不得自行解析短号、扫描 workspace 或重新拼接三段状态命令。
+- 运行时 SKILL 需要执行完成门禁时，统一调用 `agent-infra-internal task-verify {task-id} <verification-event> [--artifact <artifact>] --format text`；业务事件到 skill、workspace、gate/check 顺序和产物族的映射由 typed verification catalog 唯一维护。
+- `task-verify` 在进程内执行 typed catalog/check registry；SKILL 只声明业务事件，不传 task-dir、skill 名或特殊 check 序列。
+- 两个入口均保持只读；验证退出码固定为 `0=pass`、`1=fail`、`2=blocked`，网络或平台阻塞不得降格为成功。
+
 ## 常见命令的状态更新要求
 
 - `create-task`：创建 `branch`、`workflow`、`status`、`created_at`、`updated_at`、`assigned_to`、`agent_infra_version`
@@ -40,12 +47,13 @@
 
 ## Activity Log started / done 双标记约定（单一事实源）
 
-> 本节是 started/done 双标记的唯一权威定义。各 SKILL、渲染器（`lib/task/commands/log.ts`）、
-> 校验脚本（`.agents/scripts/validate-artifact.js`）的相关行为都以本节为准；改动任一端时同步本节。
+`analyze-task`、`review-analysis`、`plan-task`、`review-plan`、`code-task`、`review-code` 必须通过 `agent-infra-internal task-event` 声明业务事件；事件核心统一生成 `current_step`、`assigned_to`、`updated_at`、`agent_infra_version` 和下述日志文本。其余尚未迁移的生命周期 SKILL 继续遵循本节文本协议。
+
+> 本节是 started/done 双标记的唯一权威定义。各 SKILL、渲染器与 typed verification check 都以本节为准。
 
 **行语法不变**：started 与 done 都沿用既有条目语法
 `- {YYYY-MM-DD HH:mm:ss±HH:MM} — **{action}** by {agent} — {note}`，因此解析正则
-（`log.ts:ENTRY_RE` 与 `validate-artifact.js:ACTIVITY_LOG_PATTERN`）无需改动。
+（`log.ts:ENTRY_RE` 与 verification activity parser）无需改动。
 
 - **started 行**（步骤开始时写）：action 在既有基名末尾加后缀 ` [started]`，note 用 `started`：
   `- {time} — **{基名} [started]** by {agent} — started`

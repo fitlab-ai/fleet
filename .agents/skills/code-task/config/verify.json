@@ -18,6 +18,7 @@
     "artifact": {
       "file_pattern": "code.md|code-r{N}.md",
       "required_sections": [
+        "实现输入",
         "变更文件",
         "关键代码说明",
         "测试结果",
@@ -26,14 +27,13 @@
         "状态核对",
         "证据原文"
       ],
-      "freshness_minutes": 30,
       "required_patterns": [
         "^\\$ "
       ]
     },
+    "implementation-input": {},
     "activity-log": {
-      "expected_action_pattern": "(Code Task|Code) \\(Round \\d+(?:, fix for review-code(?:-r\\d+)?\\.md)?\\)",
-      "freshness_minutes": 30
+      "expected_action_pattern": "(Code Task|Code) \\(Round \\d+(?:(?:, fix for review-code(?:-r\\d+)?\\.md)|(?:, decision II-[1-9]\\d*))?\\)"
     },
     "review-ledger": {
       "stage_scope": ["analysis", "plan"]

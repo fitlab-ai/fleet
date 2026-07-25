@@ -20,6 +20,7 @@
       "required_sections": [
         "审查摘要",
         "问题清单",
+        "非阻塞建议",
         "人工校验项",
         "结论与建议",
         "状态核对",
@@ -30,12 +31,10 @@
       "required_patterns": [
         "^### 审查决定$",
         "^\\$ "
-      ],
-      "freshness_minutes": 30
+      ]
     },
     "activity-log": {
-      "expected_action_pattern": "(Review Analysis|Analysis Review) \\(Round \\d+\\)",
-      "freshness_minutes": 30
+      "expected_action_pattern": "(Review Analysis|Analysis Review) \\(Round \\d+\\)"
     },
     "platform-sync": {
       "when": "issue_number_exists",

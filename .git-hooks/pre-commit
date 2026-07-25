@@ -6,3 +6,4 @@ script_dir=$(
 )
 
 "$script_dir/check-version-format.sh"
+node "$script_dir/check-large-files.cjs"

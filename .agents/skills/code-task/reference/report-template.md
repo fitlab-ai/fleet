@@ -10,6 +10,16 @@
 - **实现轮次**: Round {code-round}
 - **产物文件**: `{code-artifact}`
 
+## 实现输入
+
+- **模式**：{init / fix / decision}
+- **方案输入**：`{plan-artifact}`
+- **审查输入**：`{review-artifact 或 N/A}`
+- **裁决输入**：`{implementation-input 或 N/A}`
+- **账本 ID**：`{decision-id 或 N/A}`
+- **裁决证据**：`{decision-evidence 或 N/A}`
+- **需求摘要**：{本轮实现输入的范围摘要}
+
 ## 状态核对
 
 > 粘贴状态核对命令原文；每条命令以 `$ ` 开头。
@@ -64,7 +74,7 @@ $ {command}
 
 ## 对审查发现的逐条核实
 
-> 仅修复模式填写；初次实现写「（本轮为初次实现，无审查发现）」。对上一轮 `review-code` 的每条发现先 Read/Grep 核实，再按 `.agents/rules/review-handshake.md` 的四态处置；并把处置与**相称证据**回写 task.md `## 审查分歧账本` 对应行（stage=code，round +1）。对称证据：accepted/adjusted 附修复点 file:line，refuted/cannot-judge 附反证 file:line 或命令原文。
+> 仅修复模式填写；初次实现写「（本轮为初次实现，无审查发现）」。对上一轮 `review-code` 的每条发现先 Read/Grep 核实，再按四态处置；相称证据完成后通过 `task-ledger finding-respond` 提交结构化意图，不手写 task.md 表格。accepted/adjusted 附修复点 file:line，refuted/cannot-judge 附反证 file:line 或命令原文。
 
 | 发现 | 处置状态 | 相称证据 |
 |------|----------|----------|

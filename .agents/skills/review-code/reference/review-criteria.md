@@ -15,6 +15,7 @@
 - [ ] 代码注释和文档
 - [ ] 与已批准技术方案的一致性
 - [ ] 已复核执行方是否漏标应升级为 `[needs-human-decision]` 的关键设计决策
+- [ ] 本轮所有 `needs-human-decision` 详情均符合 `.agents/rules/human-decision-context.md` 的自足结构
 - [ ] 每条 blocker 都配可复现的 grep/sed/nl 证据，未直接验证的结论已在「自我质疑」声明
 
 **常见反例**：
@@ -29,6 +30,12 @@
 2. **具体**：引用准确的文件路径和行号
 3. **可执行**：给出明确可落地的修复建议
 4. **按严重程度分类**：明确区分 blocker、major 和 minor
+
+## 三类审查项决策树
+
+1. 若问题揭示当前实现或测试存在正确性、完整性、安全性、性能或验收缺口，登记为正式 finding，并按影响赋予 blocker / major / minor；severity 只表示影响大小，minor 也必须闭环。
+2. 若没有已知缺陷，但只能依赖真实环境、权限或人工操作完成验证，归为 manual-validation。
+3. 仅当建议属于未来优化且不影响当前实现的完整性、正确性和验收时，归为 advisory。advisory 只写入「非阻塞建议」，不进入账本、问题计数或 verdict。
 
 ## 人工校验项分类
 

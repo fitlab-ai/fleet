@@ -13,19 +13,13 @@ description: >
 
 版本戳规则：创建或更新 `task.md` frontmatter 时，先读取 `.agents/rules/version-stamp.md`，并写入或刷新 `agent_infra_version`。
 
-## 任务入参短号别名
+## 任务上下文解析
 
-> 如果 `{task-id}` 入参匹配 `^[#]?[0-9]+$`（裸数字或带 `#` 前缀），先读取 `.agents/rules/task-short-id.md` 的「SKILL 入参解析」段执行解析；后续命令视 `{task-id}` 为解析后的全长 `TASK-YYYYMMDD-HHMMSS` 形式。
+> 入口允许省略 task ref，也接受旧位置 task ref 或 `--task <ref>` / `-t <ref>`。先从完整参数中分离 task scope 并原样保留其他业务操作数，再调用 `agent-infra-internal task-context resolve {task-scope}`；`{task-scope}` 为空、位置 ref 或 task flag 之一。只读取结构化结果的 `taskId`，后续把 `{task-id}` 绑定为该完整 `TASK-YYYYMMDD-HHMMSS`。解析失败时透传非零退出码，不自行扫描任务。
 
-## 步骤开始：写入 started 标记
+## 步骤开始：started 标记
 
-通过前置门控、确认前置条件后、本步骤第一个产出动作之前，向 task.md `## 活动日志` 追加一条 started 标记（与本步骤 done 条目同基名 + ` [started]` 后缀，note 用 `started`）。仅当存在关联 `{task-id}` / task.md 时写入：
-
-```
-- {YYYY-MM-DD HH:mm:ss±HH:MM} — **Create PR [started]** by {agent} — started
-```
-
-`ai task log` 会把它与完成时写入的 done 条目配对成一行（进行中 → 已完成）。约定见 `.agents/rules/task-management.md` 的「Activity Log started / done 双标记约定」。
+真实执行 `platform-pr create` 时由 typed core 在远端写入前幂等登记 `Create PR [started]`；dry-run 不登记。调用方不得重复手写该条目。
 
 ## 执行流程
 
@@ -68,24 +62,17 @@ description: >
 
 ### 4. 检查远程分支状态
 
-确认当前分支是否已有 upstream；必要时执行 `git push -u origin <current-branch>`。
+调用 `agent-infra-internal git-workflow inspect` 检查 upstream/remote branch；必要时通过 `git-workflow push` 推送并复核。
 
-### 5. 创建 PR
+### 5. 创建或恢复 PR
 
-先检查当前分支是否已经存在 PR；如果已存在，直接告知用户 PR URL 并结束，不要重复执行元数据同步或摘要发布。
-
-执行前先读取 `.agents/rules/issue-pr-commands.md`，并按其中的前置步骤完成认证和代码托管平台检测；随后按其中的 “创建 PR” 命令创建 PR。
+执行前先读取 `.agents/rules/issue-pr-commands.md`，把标题和正文写入临时文件，并调用其中的 `platform-pr create` intent。core 先按 head/base 精确定位：唯一既有 PR 会复用并绑定，零个才创建，多个稳定失败；重放不得产生重复 PR。
 
 如果获取到 `{task-id}` 且对应任务提供了 `issue_number`，必须在 PR 正文中保留 `Closes #{issue-number}`。
 
 ### 6. 同步 PR 元数据
 
-对获取到 `{task-id}` 的 PR，立即同步这些核心元数据：
-- 按 `.agents/rules/issue-pr-commands.md` 查询标准 label / Issue / PR 元数据
-- 按 `.agents/rules/issue-pr-commands.md` 的 PR 更新命令和权限降级规则处理 type label
-- 将 Issue 当前的 `in:` labels 复制到 PR（不重新计算，不反向更新 Issue）
-- 按 `.agents/rules/milestone-inference.md` 的「阶段 3：`create-pr`」及其权限规则复用 Issue milestone
-- 通过 `Closes #{issue-number}` 保持 Development 关联
+调用 `agent-infra-internal platform-pr sync {task-id} --agent {agent} --metadata --closing-issue`。core 从 Issue 复制 type / `in:` labels、assignee 和具体 milestone，并维护 Development 关联；逐项权限不足返回 degraded，不反向更新 Issue。
 
 ### 7. 发布审查摘要
 
@@ -93,29 +80,18 @@ description: >
 
 基于这些产物聚合 reviewer 摘要，并使用隐藏标记维护唯一且幂等的摘要评论。
 
-> 隐藏标记、幂等 summary 评论更新、review history 格式，以及评论创建/更新规则见 `reference/comment-publish.md`（其内联引用 `.agents/rules/pr-sync.md`）。发布摘要前先读取 `reference/comment-publish.md`。
->
-> **Shell 安全规则**（发布评论前必读）：
-> 1. `{comment-body}` 必须替换为**实际的内联文本**。先读取文件，再将全文粘贴到 heredoc body 中。**禁止**在 `<<'EOF'` 内部使用 `$(cat ...)`、`$(< ...)`、`$(...)`、`${...}`。
-> 2. 构造含 `<!-- -->` 的字符串时，**禁止使用 `echo`**。统一使用 `cat <<'EOF'` heredoc 或 `printf '%s\n'` 构造。
-> 3. 同样的安全约束已在 `.agents/rules/pr-sync.md` 中重述，调用该 rule 后无需重复补充另一份模板规则。
+> canonical context、摘要聚合和 `summary-sync` 调用见 `reference/comment-publish.md`（其引用 `.agents/rules/pr-sync.md`）。发布摘要前先读取该 reference。
 
-### 8. 更新任务状态
+### 8. 确认任务状态
 
-获取当前时间：
-
-```bash
-date "+%Y-%m-%d %H:%M:%S%z" | sed 's/\([+-][0-9][0-9]\)\([0-9][0-9]\)$/\1:\2/'
-```
-
-如果获取到了 `{task-id}`，更新 task.md 的 `pr_number`、`pr_status`（设为 `created`）、`updated_at`、`agent_infra_version`，并追加 Create PR 的 Activity Log，记录元数据同步和摘要发布结果。
+`platform-pr create` 在成功创建或恢复唯一远端身份后，通过任务写入内核原子更新 `pr_number`、`pr_status`、规范时间/版本和 Create PR 完成日志。调用方只核对结构化结果，不再次编辑这些字段。
 
 ### 9. 完成校验
 
 如果本次操作关联了 `{task-id}`，运行完成校验，确认任务元数据和同步状态符合规范；如果没有任务上下文，跳过本步骤。
 
 ```bash
-node .agents/scripts/validate-artifact.js gate create-pr .agents/workspace/active/{task-id} --format text
+agent-infra-internal task-verify {task-id} create-pr.completed --format text
 ```
 
 处理结果：
@@ -129,9 +105,9 @@ node .agents/scripts/validate-artifact.js gate create-pr .agents/workspace/activ
 
 > 仅在校验通过后执行本步骤。
 
-> **重要**：以下「下一步」中列出的所有 TUI 命令格式必须完整输出，不要只展示当前 AI 代理对应的格式。如果 `.agents/.airc.json` 中配置了自定义 TUI（`customTUIs`），读取每个工具的 `name` 和 `invoke`，按同样格式补充对应命令行（`${skillName}` 替换为技能名，`${projectName}` 替换为项目名）。 渲染最终输出前，先读取 `.agents/rules/next-step-output.md` 并落实其两类规则：(1) 「下一步」命令把 `{task-ref}` 渲染为短号 `#NN`（未分配/已释放时回退完整 TASK-id）；(2) 在面向用户输出的绝对最后一行追加 `Completed at` 收尾行（成功、错误、早退等任何面向用户输出都适用，不限于校验通过的成功态）。
+> **重要**：以下「下一步」中列出的所有 TUI 命令格式必须完整输出，不要只展示当前 AI 代理对应的格式。如果 `.agents/.airc.json` 中配置了自定义 TUI（`customTUIs`），读取每个工具的 `name` 和 `invoke`，按同样格式补充对应命令行（`${skillName}` 替换为技能名，`${projectName}` 替换为项目名）。 渲染最终输出前，先读取 `.agents/rules/next-step-output.md` 并落实其两类规则：(1) 「下一步」命令把 `{task-ref}` 渲染为短号 `NN`（未分配/已释放时回退完整 TASK-id）；(2) 在面向用户输出的绝对最后一行追加 `Completed at` 收尾行（成功、错误、早退等任何面向用户输出都适用，不限于校验通过的成功态）。
 
-说明 PR URL、元数据同步结果、摘要评论结果，并推荐下一步进入 PR 监控（按 `.agents/rules/next-step-output.md` 把 `{task-ref}` 渲染为短号 `#NN`）：
+说明 PR URL、元数据同步结果、摘要评论结果，并推荐下一步进入 PR 监控（按 `.agents/rules/next-step-output.md` 把 `{task-ref}` 渲染为短号 `NN`）：
 
 ```
 下一步 - 监控 PR 检查（required checks 全绿前自动自愈）：
@@ -140,22 +116,22 @@ node .agents/scripts/validate-artifact.js gate create-pr .agents/workspace/activ
   - Codex CLI：$watch-pr {task-ref}
 ```
 
-或者，若想跳过 CI 监控、直接归档任务，改用 `complete-task`：
+或者，若想跳过主动监控并立即尝试完成，改用 `complete-task`；其 required-checks 硬门禁仍会对 pending/failed/head mismatch fail-closed：
 
 ```
-下一步（备选）- 跳过监控、直接归档任务：
+下一步（备选）- 跳过主动监控并尝试完成：
   - Claude Code / OpenCode：/complete-task {task-ref}
   - Gemini CLI：/fleet:complete-task {task-ref}
   - Codex CLI：$complete-task {task-ref}
 ```
 
-`watch-pr` 为主路径，全绿后会再引导 `complete-task {task-ref}`；上面的 `complete-task` 备选块仅用于跳过 CI 监控、直接归档——两者并不等价。
+`watch-pr` 为主路径；上面的 `complete-task` 备选块只跳过主动轮询，不跳过 required checks，也不保证立即归档。
 
 ## 注意事项
 
 - 必须检查分支中的全部提交，而不是只看最后一个
 - `create-pr` 不能把 type label 映射委托给其他技能，必须在获取到 `{task-id}` 时于本技能内内联处理
-- 隐藏 summary 标记必须保持为 `.agents/rules/pr-sync.md` 中定义的 PR 摘要评论标记，以兼容已有 PR 评论
+- summary marker 与当前 HEAD 由 `platform-pr summary-sync` 统一包装
 - 如果当前分支已存在 PR，直接告知用户 PR URL 并结束，不做重复同步
 - 如果从 Issue 继承元数据失败，继续使用 task.md 和分支推断兜底
 
@@ -165,5 +141,5 @@ node .agents/scripts/validate-artifact.js gate create-pr .agents/workspace/activ
 - 推送被拒绝：建议执行 `git pull --rebase`
 - 已存在 PR：直接输出当前 PR URL 并结束
 - 无法访问 Issue 元数据：跳过继承并继续
-- PR 创建失败且已关联 `{task-id}`：调用 `node .agents/scripts/workflow-warnings.js add .agents/workspace/active/{task-id} --step create-pr --severity ACTION_REQUIRED --code PR_CREATE_FAILED --target pr --message "{reason}" --action "修复推送、权限或平台问题后重跑 create-pr"`，不写 `pr_number`
+- PR 创建失败且已关联 `{task-id}`：调用 `agent-infra-internal task-warning {task-id} add --step create-pr --severity ACTION_REQUIRED --code PR_CREATE_FAILED --target pr --message "{reason}" --action "修复推送、权限或平台问题后重跑 create-pr"` 提交结构化 warning 意图，不写 `pr_number`
 - PR 摘要评论失败且已关联 `{task-id}`：按 `.agents/rules/pr-sync.md` 记录 `COMMENT_SYNC_FAILED` 告警，不回滚已创建 PR

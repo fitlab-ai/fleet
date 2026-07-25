@@ -3,6 +3,7 @@ name: complete-task
 description: >
   标记任务完成并归档。
   当任务工作已完成并验证、需要收尾归档时使用。
+  仅当对话包含可解析的任务引用时才可自动调用本技能。
 ---
 
 # 完成任务
@@ -21,26 +22,20 @@ description: >
 运行以下命令，并把原文粘贴到回复正文和本轮产物的 `## 状态核对` 段：
 
 ```bash
-git status -s
-ls -la .agents/workspace/active/{task-id}/
-tail .agents/workspace/active/{task-id}/task.md
+agent-infra-internal task-snapshot {task-id} --format text
 ```
 
 状态核对完成前，禁止任何关于外部状态的断言（例如“代码没变”“测试已通过”“没有其他引用”），包括思考阶段。本门禁只提供结构下限；逐条证据配对和真实性仍需按报告模板与审查要求核对。
 
-## 任务入参短号别名
+## 任务上下文解析
 
-> 如果 `{task-id}` 入参匹配 `^[#]?[0-9]+$`（裸数字或带 `#` 前缀），先读取 `.agents/rules/task-short-id.md` 的「SKILL 入参解析」段执行解析；后续命令视 `{task-id}` 为解析后的全长 `TASK-YYYYMMDD-HHMMSS` 形式。
+> 入口允许省略 task ref，也接受旧位置 task ref 或 `--task <ref>` / `-t <ref>`。先从完整参数中分离 task scope 并原样保留其他业务操作数，再调用 `agent-infra-internal task-context resolve {task-scope}`；`{task-scope}` 为空、位置 ref 或 task flag 之一。只读取结构化结果的 `taskId`，后续把 `{task-id}` 绑定为该完整 `TASK-YYYYMMDD-HHMMSS`。解析失败时透传非零退出码，不自行扫描任务。
 
-## 步骤开始：写入 started 标记
+> 解析任务引用，并确认任务位于本技能支持的状态或目录且存在 `task.md`；无法定位时按未找到任务处理并停止。
 
-确认任务存在后、本轮第一个产出动作之前，向 task.md `## 活动日志` 追加一条 started 标记（与本轮 done 条目同基名 + ` [started]` 后缀，note 用 `started`）：
+## 步骤开始：本地生命周期边界
 
-```
-- {YYYY-MM-DD HH:mm:ss±HH:MM} — **Complete Task [started]** by {agent} — started
-```
-
-`ai task log` 会把它与完成时写入的 done 条目配对成一行（进行中 → 已完成）。格式与配对规则见 `.agents/rules/task-management.md` 的「Activity Log started / done 双标记约定」。
+正常完成路径在 active 阶段完成业务更新、平台同步和预完成门禁后，才由步骤 6 的单次 lifecycle intent 原子完成基础终态字段、started/done 日志、目录转移和短号释放；不得提前手工写入这些机械状态。已归档任务只允许进入 `finalization-retry` 场景，不回迁目录或重新执行 lifecycle。
 
 ## 执行步骤
 ### 1. 验证任务存在
@@ -50,8 +45,11 @@ tail .agents/workspace/active/{task-id}/task.md
 注意：`{task-id}` 格式为 `TASK-{yyyyMMdd-HHmmss}`，例如 `TASK-20260306-143022`
 
 如果在 `active/` 中未找到，检查 `blocked/` 和 `completed/`：
-- 如果在 `completed/`：告知用户任务已完成
+- 如果在 `completed/` 且 task.md 存在匹配的 Complete Task Activity Log：进入场景 B `finalization-retry`，跳过步骤 2-6，直接执行步骤 7
+- 如果在 `completed/` 但缺少匹配日志：告知用户任务已完成但终态身份不完整并停止，不手工修补
 - 如果在 `blocked/`：告知用户任务被阻塞；建议先解除阻塞
+
+场景 A 为 active 任务的正常完成路径；场景 B `finalization-retry` 只重试归档后的 task 评论与终态门禁。
 
 ### 2. 验证完成前置条件（未满足则必须停止）
 
@@ -88,16 +86,7 @@ tail .agents/workspace/active/{task-id}/task.md
 - [ ] 代码已审查（`review-code.md` 或 `review-code-r{N}.md` 存在，且最新审查结论为 Approved；或已在外部完成审查）
 - [ ] 代码已提交（没有与此任务相关的未提交变更）
 - [ ] 测试通过
-- [ ] 审查分歧账本无未关闭分歧，且无未复审的 post-review 提交（由下方「预完成硬门禁」机械校验）
-
-**预完成硬门禁（在移动目录、释放短号之前运行）**：步骤 7 的 `gate complete-task` 在目录已 `mv` 到 `completed/`、短号已释放之后才运行；为避免门禁失败发生在不可逆操作之后，必须在 **active 目录**上预先运行新增的两项完成门禁：
-
-```bash
-node .agents/scripts/validate-artifact.js check review-ledger .agents/workspace/active/{task-id} --skill complete-task --format text
-node .agents/scripts/validate-artifact.js check post-review-commit .agents/workspace/active/{task-id} --skill complete-task --format text
-```
-
-任一退出码非 0（fail/blocked）→ 按前置条件未满足处理，**停止**，不执行步骤 3-7。若输出包含 `reviewed snapshot was not anchored`，必须先重新 `commit` 或 `review-code`；不得回退审查基线。`--force` **不解除**本硬门禁：未关闭分歧必须先在账本闭合（`confirmed`/`closed`/`human-decided`），已锚点后的未复审提交必须重新 `review-code` 或在账本追加 `post-review-commit` / `human-decided` 豁免行。
+- [ ] 审查分歧账本无未关闭分歧、无未复审的 post-review 提交，且本地 HEAD、`last_reviewed_commit`、PR head 一致并由最新 required checks 覆盖（由下方「预完成硬门禁」机械校验）
 
 > **⚠️ 前置条件分支判断 — 你必须先判断“继续”还是“停止”：**
 >
@@ -105,7 +94,7 @@ node .agents/scripts/validate-artifact.js check post-review-commit .agents/works
 > - 如果任意一个条件不满足 → **默认停止**，输出前置条件未满足的警告
 > - 只有用户明确要求 `--force` 时，才可以在前置条件未满足时继续
 >
-> **禁止在前置条件未满足时继续执行步骤 3-7，也不要输出「任务 {task-id} 已完成，任务目录已转移到 completed/。」**
+> **禁止在前置条件未满足时继续执行步骤 3-8，也不要输出「任务 {task-id} 已完成，任务目录已转移到 completed/。」**
 
 如果任何前置条件未满足，警告用户：
 ```
@@ -115,40 +104,58 @@ Cannot complete task {task-id} - prerequisites not met:
 Please complete the missing steps first, or use --force to override.
 ```
 
-如果前置条件未满足且用户未明确提供 `--force`，立即停止，不执行步骤 3-7。
+如果前置条件未满足且用户未明确提供 `--force`，立即停止，不执行步骤 3-8。
 
-### 3. 更新任务元数据
+### 3. 完成业务内容更新
 
-获取当前时间：
-
-```bash
-date "+%Y-%m-%d %H:%M:%S%z" | sed 's/\([+-][0-9][0-9]\)\([0-9][0-9]\)$/\1:\2/'
-```
-
-更新 `.agents/workspace/active/{task-id}/task.md`：
-- `status`：completed
-- `current_step`：completed
-- `completed_at`：{当前时间戳}
-- `target_date`：仅当为空时写入 `completed_at` 的日期部分（`YYYY-MM-DD`）；已有值（人工填写）则保留
-- `updated_at`：{当前时间戳}
-- `agent_infra_version`：按 `.agents/rules/version-stamp.md` 取值
+在 `.agents/workspace/active/{task-id}/task.md` 中只更新生命周期核心不负责的业务内容：
 - 新增或更新 `## 状态核对` 段，粘贴第 0 步审计命令原文（含 `$ ` 前缀行），放在 `## 活动日志` 之前
 - 标记所有工作流步骤为已完成
 - 逐项验证并勾选 `## 完成检查清单` 中的所有条目（将 `- [ ]` 改为 `- [x]`）
-- **追加**到 `## Activity Log`（不要覆盖之前的记录）：
-  ```
-  - {YYYY-MM-DD HH:mm:ss±HH:MM} — **Complete Task** by {agent} — Task moved to completed/
-  ```
 
-### 4. 转移任务
+不得在本步骤写 `status/current_step/completed_at/updated_at/agent_infra_version`、基础 Activity Log、目录或短号；这些由步骤 6 统一提交。
 
-将任务目录从 active 移动到 completed：
+### 4. 在 active 阶段同步平台
+
+检查 `task.md` 中是否存在有效的 `issue_number`。如果没有，跳过本步骤且不输出任何内容。
+
+> Issue 元数据边界见 `.agents/rules/issue-sync.md`；评论同步统一调用 internal platform intent。
+
+如果存在有效的 `issue_number`，严格按以下顺序执行：
+
+1. 按 artifact catalog 顺序，对本地已有产物逐项调用 `agent-infra-internal platform-comment sync {task-id} --kind artifact --artifact {artifact} --agent {artifact-agent} --backfill`。
+2. 调用 `agent-infra-internal platform-issue sync {task-id} --agent {agent} --requirements --fields`。
+3. 把业务摘要写入临时文件，并调用 `agent-infra-internal platform-comment sync {task-id} --kind summary --body-file {path} --agent {agent}`。
+
+不要在本步骤同步 task 评论；它依赖 lifecycle 写入后的完整终态 task.md。不要设置 `status:` label，平台自动化应在 Issue 关闭后清理状态标签。
+
+任一操作失败时，任务仍必须位于 active 且短号仍有效；先按失败类型调用以下结构化 warning intent，再立即停止，不进入步骤 5：
 
 ```bash
-mv .agents/workspace/active/{task-id} .agents/workspace/completed/{task-id}
+agent-infra-internal task-warning {task-id} add --step complete-task --severity ACTION_REQUIRED --code {COMMENT_SYNC_FAILED|REQUIREMENTS_SYNC_FAILED|SUMMARY_SYNC_FAILED|NETWORK_RETRY_EXHAUSTED} --target {artifact|issue|summary|platform} --message "{error_code}: {error_message}" --action "修复平台同步问题后重跑 complete-task"
 ```
 
-### 5. 验证转移
+相同 `step/code/target` 组合由核心幂等去重；调用方不分配 warning id 或手写账本行。
+
+### 5. 运行 active 预完成硬门禁
+
+平台写入成功后、移动目录和释放短号之前运行：
+
+```bash
+agent-infra-internal task-verify {task-id} complete-task.preflight --format text
+```
+
+该事件依次执行 `review-ledger`、`post-review-commit`、`required-checks`、`platform-sync-preflight`。任一退出码非 0（fail/blocked）时，任务必须继续留在 active；从 gate 结果取稳定 code/target，通过 `task-warning ... add --step complete-task ...` 落账后停止。若审查基线或 head 不一致，必须先重新 `commit` / `review-code`；checks pending/failed/cancelled 时运行 `watch-pr`；不得回退审查基线。
+
+`--force` 不解除本硬门禁：未关闭分歧必须先在账本闭合，未复审提交必须重新审查或具备有效豁免，required checks 与三重 head 对齐必须通过，平台 preflight 必须通过。
+
+### 6. 执行本地生命周期意图并验证转移
+
+```bash
+agent-infra-internal task-lifecycle {task-id} complete --agent {agent}
+```
+
+仅 `status=applied|no-op` 视为本地完成。`status=failed` 时展示 `error` 与 completed/pending steps，以同一 intent 重试；不得宣称完成或手工补写局部状态。
 
 ```bash
 ls .agents/workspace/completed/{task-id}/task.md
@@ -156,37 +163,26 @@ ls .agents/workspace/completed/{task-id}/task.md
 
 确认任务目录已成功移动。
 
-### 6. 同步到 Issue
+### 7. 同步终态 task 评论并完成校验
 
-检查 `task.md` 中是否存在有效的 `issue_number`。如果没有，跳过此步骤且不输出任何内容。
-
-> Issue 同步规则见 `.agents/rules/issue-sync.md`。执行同步前先读取该文件，完成 upstream 仓库检测和权限检测。
-
-如果存在有效的 `issue_number`：
-- 先按 `.agents/rules/issue-sync.md` 的补发规则扫描并补发未发布的 `task.md`、`analysis*.md`、`review-analysis*.md`、`plan*.md`、`review-plan*.md`、`code*.md`、`review-code*.md` 评论（`task.md` 走幂等更新路径）
-- 按 issue-sync.md 的需求复选框同步步骤，兜底同步 `## 需求` 中已勾选的条目到 Issue body
-- 不要设置 `status:` label — 平台自动化应在 Issue 关闭后清理状态标签；预完成 platform-sync gate 会验证 CLOSED Issue 不含任何 `status:` 标签，残留时失败并要求等待或修复 workflow 后重跑
-- 最后创建或更新 `.agents/rules/issue-sync.md` 中定义的 summary 评论标记对应的 summary 评论
-- 读取 `.agents/rules/issue-fields.md`，按流程 A 把 `task.md` 中所有非空的 Issue 字段（`priority`/`effort`/`start_date`/`target_date`）同步到 Issue（幂等；`has_push=false` 或取数/写入失败时跳过，不阻断）
-
-### 7. 完成校验
-
-**释放短号**（先 `mv` 目录已成功，再 release；脚本幂等，未在注册表也返回 0）：
+场景 A 与场景 B `finalization-retry` 都从 completed 目录执行本步骤。若存在有效的 `issue_number`，先调用：
 
 ```bash
-node .agents/scripts/task-short-id.js release "$task_id" || true
+agent-infra-internal platform-comment sync {task-id} --kind task --agent {agent}
 ```
+
+该调用失败时任务已归档，不能调用只接受 active 任务的 `task-warning`；保留 completed 状态并停止。修复网络或平台问题后重跑 complete-task，会由步骤 1 进入 `finalization-retry`，只重复本步骤。
 
 运行完成校验，确认任务产物和同步状态符合规范：
 
 ```bash
-node .agents/scripts/validate-artifact.js gate complete-task .agents/workspace/completed/{task-id} --format text
+agent-infra-internal task-verify {task-id} complete-task.completed --format text
 ```
 
 处理结果：
 - 退出码 0（全部通过）-> 继续到「告知用户」步骤
 - 退出码 1（校验失败）-> 根据输出修复问题后重新运行校验
-- 退出码 2（网络中断）-> 停止执行并告知用户需要人工介入
+- 退出码 2（网络中断或状态标签清理尚未收敛）-> 保留 completed 状态并停止；稍后重跑 complete-task 进入 `finalization-retry`
 
 将校验输出保留在回复中作为当次验证输出。没有当次校验输出，不得声明完成。
 

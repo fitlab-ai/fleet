@@ -3,6 +3,7 @@ name: analyze-task
 description: >
   分析任务并输出需求分析文档。
   当需要在动手设计前厘清某个任务的需求、影响范围与风险时使用。
+  仅当对话包含可解析的任务引用时才可自动调用本技能。
 ---
 
 # 分析任务
@@ -22,26 +23,24 @@ description: >
 运行以下命令，并把原文粘贴到回复正文和本轮产物的 `## 状态核对` 段：
 
 ```bash
-git status -s
-ls -la .agents/workspace/active/{task-id}/
-tail .agents/workspace/active/{task-id}/task.md
+agent-infra-internal task-snapshot {task-id} --format text
 ```
 
 状态核对完成前，禁止任何关于外部状态的断言（例如“代码没变”“测试已通过”“没有其他引用”），包括思考阶段。本门禁只提供结构下限；逐条证据配对和真实性仍需按报告模板与审查要求核对。
 
-## 任务入参短号别名
+## 任务上下文解析
 
-> 如果 `{task-id}` 入参匹配 `^[#]?[0-9]+$`（裸数字或带 `#` 前缀），先读取 `.agents/rules/task-short-id.md` 的「SKILL 入参解析」段执行解析；后续命令视 `{task-id}` 为解析后的全长 `TASK-YYYYMMDD-HHMMSS` 形式。
+> 入口允许省略 task ref，也接受旧位置 task ref 或 `--task <ref>` / `-t <ref>`。先从完整参数中分离 task scope 并原样保留其他业务操作数，再调用 `agent-infra-internal task-context resolve {task-scope}`；`{task-scope}` 为空、位置 ref 或 task flag 之一。只读取结构化结果的 `taskId`，后续把 `{task-id}` 绑定为该完整 `TASK-YYYYMMDD-HHMMSS`。解析失败时透传非零退出码，不自行扫描任务。
 
-## 步骤开始：写入 started 标记
+> 解析任务引用，并确认任务位于本技能支持的状态或目录且存在 `task.md`；无法定位时按未找到任务处理并停止。
 
-确认前置条件后、本轮第一个产出动作之前，向 task.md `## 活动日志` 追加一条 started 标记（与本轮 done 条目同基名 + ` [started]` 后缀，note 用 `started`）：
+## 步骤开始：声明 started 事件
 
+确认前置条件和轮次后、本轮第一个产出动作之前执行：
+
+```bash
+agent-infra-internal task-event {task-id} analyze.started --agent {agent}
 ```
-- {YYYY-MM-DD HH:mm:ss±HH:MM} — **Analyze Task (Round {N}) [started]** by {agent} — started
-```
-
-`ai task log` 会把它与步骤完成时（步骤 7）写入的 done 条目配对成一行（进行中 → 已完成）。格式与配对规则见 `.agents/rules/task-management.md` 的「Activity Log started / done 双标记约定」。
 
 ## 执行步骤
 ### 1. 验证前置条件
@@ -53,16 +52,9 @@ tail .agents/workspace/active/{task-id}/task.md
 
 如果缺少 `task.md`，提示用户先创建或导入任务。
 
-### 2. 确定分析轮次
+### 2. 解析分析上下文
 
-扫描 `.agents/workspace/active/{task-id}/` 目录中的分析产物文件：
-- 如果不存在 `analysis.md` 且不存在 `analysis-r*.md` → 本轮为第 1 轮，产出 `analysis.md`
-- 如果存在 `analysis.md` 且不存在 `analysis-r*.md` → 本轮为第 2 轮，产出 `analysis-r2.md`
-- 如果存在 `analysis-r{N}.md` → 本轮为第 N+1 轮，产出 `analysis-r{N+1}.md`
-
-记录：
-- `{analysis-round}`：本轮分析轮次
-- `{analysis-artifact}`：本轮分析产物文件名
+运行 `agent-infra-internal task-artifact {task-id} inspect --family analysis`。仅当结果为 `ready` 时继续；从 `next.round` / `next.name` 记录 `{analysis-round}` / `{analysis-artifact}`，从 `inputs` 读取修订上下文。不得自行扫描轮次或拼装文件名。随后执行 started 事件，并以事件返回的 `artifactContext` 复核同一身份。
 
 ### 3. 阅读任务上下文
 
@@ -76,7 +68,7 @@ tail .agents/workspace/active/{task-id}/task.md
 - `codescan_alert_number` - Code Scanning 告警
 - `security_alert_number` - Dependabot 告警
 
-**Round ≥ 2：响应上一轮审查（仅当存在审查产物时）**：若任务目录存在 `review-analysis.md` / `review-analysis-r{N}.md`，读取最高轮次的审查报告；在本轮分析产物中新增 `## 对上一轮审查的响应` 段，对每条发现先 Read/Grep 核实，再按 `.agents/rules/review-handshake.md` 的四态（`accepted` / `adjusted` / `refuted` / `cannot-judge`）处置——每态都要附相称证据，不默认顺从；并把处置回写 task.md `## 审查分歧账本` 对应行（stage=analysis，round +1）。未决分歧写入 `## 未决问题`。Round 1 无审查，跳过本段。
+**Round ≥ 2：响应上一轮审查（仅当存在审查产物时）**：若任务目录存在 `review-analysis.md` / `review-analysis-r{N}.md`，读取最高轮次的审查报告；在本轮分析产物中新增 `## 对上一轮审查的响应` 段，对每条发现先 Read/Grep 核实，再按 `.agents/rules/review-handshake.md` 的四态（`accepted` / `adjusted` / `refuted` / `cannot-judge`）处置——每态都要附相称证据，不默认顺从；随后逐条调用 `agent-infra-internal task-ledger {task-id} finding-respond --id {ledger-id} --round {analysis-round} --status {四态} --evidence {相称证据}`。未决分歧写入 `## 未决问题`。Round 1 无审查，跳过本段。
 
 ### 4. 入口需求充分性闸门
 
@@ -111,12 +103,11 @@ tail .agents/workspace/active/{task-id}/task.md
   1. 确定本轮要问的问题（与 4.2 保持一致）：
      - 若已存在 `pending_question`（上一问尚未得到答案）→ 复述该 `pending_question`，**不**修改它、**不**增加 `question_count`；
      - 否则（无待答问题）→ 选最高价值的一个问题（验收标准 > 范围 > 歧义），写入 `## Brainstorming`：`status: asking`、`pending_question: <问题>`、`question_count += 1`。
-  2. 更新 frontmatter：`current_step: requirement-analysis`、`assigned_to`、`updated_at`、`agent_infra_version`（先读 `.agents/rules/version-stamp.md`）；若 `start_date` 为空，同时写入当日日期（`date +%F`），以满足 requirement-analysis 阶段 `start_date` 必填校验。
-  3. 追加 Activity Log：`- {YYYY-MM-DD HH:mm:ss±HH:MM} — **Analyze Task (Brainstorming)** by {agent} — Asked Q{question_count}, awaiting answer`。
-  4. Issue 同步（存在 `issue_number` 时，任一失败跳过）：先读 `.agents/rules/issue-sync.md` 完成 upstream / 权限检测；仅按 task.md 评论同步规则更新 **task 评论**；`status` label 维持 `pending-design-work`；**不**发布分析产物评论。
-  5. 校验（替代步骤 8 的 artifact gate）：`node .agents/scripts/validate-artifact.js check task-meta .agents/workspace/active/{task-id} --skill analyze-task --format text`（早退已置 `current_step: requirement-analysis` 且已写入 `start_date`，预期通过）；并保留 `rg -n 'Analyze Task \(Brainstorming\)' .agents/workspace/active/{task-id}/task.md` 与 task 评论同步证据。**不**跑 artifact gate，也不跑 `check activity-log` / `check platform-sync`（二者绑定分析产物路径）。
-  6. 用户输出：只展示当前**单个问题** + 如何回答/继续（再次触发 `analyze-task {task-ref}` 并附答案），并按 `.agents/rules/next-step-output.md` 在末行追加 `Completed at`。
-  7. **STOP**，等待回答。下一次触发回到本步骤。
+  2. 若 `start_date` 为空，写入当日日期（`date +%F`）；随后执行 `agent-infra-internal task-event {task-id} analyze.awaiting-input --agent {agent} --question {question_count}`，由核心统一更新基础 frontmatter 和 Activity Log。
+  3. Issue 同步（存在 `issue_number` 时，任一失败跳过）：调用 `agent-infra-internal platform-comment sync {task-id} --kind task --agent {agent}` 更新 **task 评论**；`status` label 维持 `pending-design-work`；**不**发布分析产物评论。
+  4. 校验（替代步骤 8 的 artifact gate）：`agent-infra-internal task-verify {task-id} analyze.awaiting-input --format text`（早退已置 `current_step: requirement-analysis` 且已写入 `start_date`，预期通过）；并保留 `rg -n 'Analyze Task \(Brainstorming\)' .agents/workspace/active/{task-id}/task.md` 与 task 评论同步证据。**不**跑 artifact gate，也不跑 `check activity-log` / `check platform-sync`（二者绑定分析产物路径）。
+  5. 用户输出：只展示当前**单个问题** + 如何回答/继续（再次触发 `analyze-task {task-ref}` 并附答案），并按 `.agents/rules/next-step-output.md` 在末行追加 `Completed at`。
+  6. **STOP**，等待回答。下一次触发回到本步骤。
 
 ### 5. 执行需求分析
 
@@ -190,14 +181,7 @@ tail .agents/workspace/active/{task-id}/task.md
 ## 人工裁决待办
 
 > 仅当本轮升级了 `[needs-human-decision]` 关键设计决策时写本段；没有则省略。
-> 每项一个 `### HD-N` 块（`HD-N` 全局唯一，见 `.agents/rules/review-handshake.md`），并在 task.md `## 审查分歧账本` upsert 对应 `HD-` 行（evidence 指向 `{analysis-artifact}#HD-N`）。
-
-### HD-{N}：{标题} [needs-human-decision]
-
-- **背景**：{为何成为待裁决项}
-- **选项**：{A / B / …}
-- **影响**：{范围 / 边界 / 先例}
-- **推荐**：{推荐选项及理由}
+> 每项先调用 `agent-infra-internal task-ledger {task-id} decision-next-id` 取得 `HD-N`，按 `.agents/rules/human-decision-context.md` 写自足 `### HD-N` 块，再调用 `decision-upsert --id {HD-N} --stage analysis --artifact {analysis-artifact}`；不得扫描编号或手写账本行。
 
 ## 工作量和复杂度评估
 - 复杂度：{高/中/低}
@@ -206,35 +190,18 @@ tail .agents/workspace/active/{task-id}/task.md
 
 ### 7. 更新任务状态
 
-获取当前时间：
-
-```bash
-date "+%Y-%m-%d %H:%M:%S%z" | sed 's/\([+-][0-9][0-9]\)\([0-9][0-9]\)$/\1:\2/'
-```
-
 更新 `.agents/workspace/active/{task-id}/task.md`：
-- `current_step`：requirement-analysis
-- `assigned_to`：{当前 AI 代理}
-- `updated_at`：{当前时间}
-- `agent_infra_version`：按 `.agents/rules/version-stamp.md` 取值
-- 记录本轮分析产物：`{analysis-artifact}`（Round `{analysis-round}`）
-- 如任务模板包含 `## 分析` 段落，更新为指向 `{analysis-artifact}` 的链接
-- 在工作流进度中标记 requirement-analysis 为已完成，并注明实际轮次（如果任务模板支持）
+- 仅更新优先级、Brainstorming、审查响应等本技能拥有的业务内容；产物链接、阶段与完成日志由 completed 事件统一登记
 - 在追加工作流 Activity Log 条目之前，基于分析结果（业务影响、风险、依赖、阻塞条件）重估 `priority`。若重估值与 `task.md` 当前值不一致：
   - 用新值覆盖 frontmatter 的 `priority` 字段
   - 在本轮分析产物 `{analysis-artifact}` 中追加 `## 优先级重估` 段，记录一条：`priority {old} → {new} (rationale: {基于本轮分析的简短依据})`
   若重估值与当前值一致，跳过：不写入 `## 优先级重估` 段。后续 Flow A 同步会读取可能更新过的 frontmatter，并自动把新值同步到 Issue。
-- **追加**到 `## Activity Log`（不要覆盖之前的记录）：
-  ```
-  - {YYYY-MM-DD HH:mm:ss±HH:MM} — **Analyze Task (Round {N})** by {agent} — Analysis completed → {analysis-artifact}
-  ```
+- 完成业务内容更新后执行 `agent-infra-internal task-event {task-id} analyze.completed --agent {agent} --artifact {analysis-artifact}`，由核心原子登记链接、阶段、代理、时间、版本和 Activity Log。
 
 如果 task.md 中存在有效的 `issue_number`，执行以下同步操作（任一失败则跳过并继续）：
-- 执行前先读取 `.agents/rules/issue-sync.md`，完成 upstream 仓库检测和权限检测
-- 按 issue-sync.md 设置 `status: pending-design-work`
-- 创建或更新 `.agents/rules/issue-sync.md` 中定义的 task 评论标记（按 issue-sync.md 的 task.md 评论同步规则）
-- 发布 `{analysis-artifact}` 评论
-- 读取 `.agents/rules/issue-fields.md`，按流程 A 把 `task.md` 中所有非空的 Issue 字段（`priority`/`effort`/`start_date`/`target_date`）同步到 Issue（幂等；`has_push=false` 或取数/写入失败时跳过，不阻断）
+- 调用 `agent-infra-internal platform-issue sync {task-id} --agent {agent} --status pending-design-work --fields`
+- 调用 `agent-infra-internal platform-comment sync {task-id} --kind task --agent {agent}`
+- 调用 `agent-infra-internal platform-comment sync {task-id} --kind artifact --artifact {analysis-artifact} --agent {agent}`
 
 ### 8. 完成校验
 
@@ -243,7 +210,7 @@ date "+%Y-%m-%d %H:%M:%S%z" | sed 's/\([+-][0-9][0-9]\)\([0-9][0-9]\)$/\1:\2/'
 运行完成校验，确认任务产物和同步状态符合规范：
 
 ```bash
-node .agents/scripts/validate-artifact.js gate analyze-task .agents/workspace/active/{task-id} {analysis-artifact} --format text
+agent-infra-internal task-verify {task-id} analyze.completed --artifact {analysis-artifact} --format text
 ```
 
 处理结果：
@@ -259,7 +226,7 @@ node .agents/scripts/validate-artifact.js gate analyze-task .agents/workspace/ac
 
 > 仅在校验通过后执行本步骤。
 
-> **重要**：以下「下一步」中列出的所有 TUI 命令格式必须完整输出，不要只展示当前 AI 代理对应的格式。如果 `.agents/.airc.json` 中配置了自定义 TUI（`customTUIs`），读取每个工具的 `name` 和 `invoke`，按同样格式补充对应命令行（`${skillName}` 替换为技能名，`${projectName}` 替换为项目名）。 渲染最终输出前，先读取 `.agents/rules/next-step-output.md` 并落实其两类规则：(1) 「下一步」命令把 `{task-ref}` 渲染为短号 `#NN`（未分配/已释放时回退完整 TASK-id）；(2) 在面向用户输出的绝对最后一行追加 `Completed at` 收尾行（成功、错误、早退等任何面向用户输出都适用，不限于校验通过的成功态）。
+> **重要**：以下「下一步」中列出的所有 TUI 命令格式必须完整输出，不要只展示当前 AI 代理对应的格式。如果 `.agents/.airc.json` 中配置了自定义 TUI（`customTUIs`），读取每个工具的 `name` 和 `invoke`，按同样格式补充对应命令行（`${skillName}` 替换为技能名，`${projectName}` 替换为项目名）。 渲染最终输出前，先读取 `.agents/rules/next-step-output.md` 并落实其两类规则：(1) 「下一步」命令把 `{task-ref}` 渲染为短号 `NN`（未分配/已释放时回退完整 TASK-id）；(2) 在面向用户输出的绝对最后一行追加 `Completed at` 收尾行（成功、错误、早退等任何面向用户输出都适用，不限于校验通过的成功态）。
 
 输出格式：
 ```

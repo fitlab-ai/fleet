@@ -62,7 +62,12 @@ pr_status: pending             # PR 状态：pending（默认）| created（已�
 
 ## 人工裁决
 
-<!-- 人类在此记录对 needs-human-decision 决策的裁定，并把 ## 审查分歧账本 对应 HD- 行翻为 human-decided。 -->
+<!-- 使用 ai decide <task-ref> <序号|账本ID> [--needs-implementation true|false] <裁决内容> 写入 needs-human-decision 裁定；code 阶段必须显式声明是否需要实现。 -->
+
+## 实现输入
+
+| id | ledger_id | decision_evidence | stage | needs_implementation | decided_at | status | consumed_by |
+|----|-----------|-------------------|-------|----------------------|------------|--------|-------------|
 
 ## 工作流告警
 
