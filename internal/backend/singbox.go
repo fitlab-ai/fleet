@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -186,17 +187,44 @@ func (s *SingBox) Start(ctx context.Context, request dataplane.StartRequest) (da
 			"Could not start sing-box", err,
 		)
 	}
-	go func() { _ = handle.Wait() }()
+	waitResult := make(chan error, 1)
+	go func() { waitResult <- handle.Wait() }()
 
+	startedAt := time.Now().UTC()
 	identity := dataplane.ProcessIdentity{
 		PID: handle.PID(), Executable: s.Binary,
 		ArgsFingerprint: platform.FingerprintArgs(args),
-		StartedAt:       time.Now().UTC(),
+		StartedAt:       startedAt,
 	}
-	if s.Inspector != nil {
-		if inspected, inspectErr := s.Inspector.Inspect(handle.PID()); inspectErr == nil && inspected.PID > 0 {
-			identity = inspected
+	inspector := s.Inspector
+	if inspector == nil {
+		inspector = platform.ExecProcessInspector{}
+	}
+	inspected, inspectErr := inspector.Inspect(handle.PID())
+	if inspectErr == nil && inspected.PID > 0 && platform.SameProcess(inspected, identity) {
+		identity = inspected
+		identity.StartedAt = startedAt
+	} else if request.Mode == dataplane.ModeTUN && os.Geteuid() != 0 {
+		resolver, ok := inspector.(platform.DescendantProcessResolver)
+		if !ok {
+			cleanupErr := terminateLaunchedProcess(handle, waitResult)
+			return dataplane.Instance{}, dataplane.NewError(
+				dataplane.CodeStart, "start", s.ID(),
+				"Could not identify the privileged sing-box process",
+				errors.Join(errors.New("process inspector cannot resolve descendants"), cleanupErr),
+			)
 		}
+		resolved, resolveErr := resolver.ResolveDescendant(ctx, handle.PID(), identity)
+		if resolveErr != nil {
+			cleanupErr := terminateLaunchedProcess(handle, waitResult)
+			return dataplane.Instance{}, dataplane.NewError(
+				dataplane.CodeStart, "start", s.ID(),
+				"Could not identify the privileged sing-box process",
+				errors.Join(resolveErr, cleanupErr),
+			)
+		}
+		identity = resolved
+		identity.StartedAt = startedAt
 	}
 	return dataplane.Instance{
 		ID: request.LeaseID, Backend: s.ID(), Mode: request.Mode,
@@ -206,6 +234,41 @@ func (s *SingBox) Start(ctx context.Context, request dataplane.StartRequest) (da
 			Key:  net.JoinHostPort(request.Endpoint.Host, strconv.Itoa(request.Endpoint.Port)),
 		}},
 	}, nil
+}
+
+func terminateLaunchedProcess(
+	handle platform.ProcessHandle,
+	waitResult <-chan error,
+) error {
+	select {
+	case <-waitResult:
+		return nil
+	default:
+	}
+	var cleanupErr error
+	if err := handle.Terminate(); err != nil {
+		cleanupErr = errors.Join(cleanupErr, fmt.Errorf("terminate launcher: %w", err))
+	} else {
+		timer := time.NewTimer(3 * time.Second)
+		select {
+		case <-waitResult:
+			timer.Stop()
+			return nil
+		case <-timer.C:
+			cleanupErr = errors.Join(cleanupErr, errors.New("launcher did not exit after TERM"))
+		}
+	}
+	if err := handle.Kill(); err != nil {
+		return errors.Join(cleanupErr, fmt.Errorf("kill launcher: %w", err))
+	}
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	select {
+	case <-waitResult:
+		return cleanupErr
+	case <-timer.C:
+		return errors.Join(cleanupErr, errors.New("launcher did not exit after KILL"))
+	}
 }
 
 func (s *SingBox) Stop(ctx context.Context, instance dataplane.Instance) error {

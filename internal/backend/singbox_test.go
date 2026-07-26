@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -72,6 +73,9 @@ type adapterHandle struct{ pid int }
 
 func (h adapterHandle) PID() int  { return h.pid }
 func (adapterHandle) Wait() error { return nil }
+func (adapterHandle) Terminate() error {
+	return nil
+}
 func (adapterHandle) Kill() error { return nil }
 
 type adapterLauncher struct {
@@ -94,6 +98,160 @@ func (i *adapterInspector) Inspect(int) (dataplane.ProcessIdentity, error) {
 func (i *adapterInspector) Signal(_ dataplane.ProcessIdentity, signal os.Signal) error {
 	i.signals = append(i.signals, signal)
 	return nil
+}
+
+type acceptingAuthorizer struct{}
+
+func (acceptingAuthorizer) Authorize(context.Context) error { return nil }
+
+type cleanupHandle struct {
+	mu             sync.Mutex
+	terminated     bool
+	killed         bool
+	processStopped chan struct{}
+	stopOnce       sync.Once
+}
+
+func newCleanupHandle() *cleanupHandle {
+	return &cleanupHandle{processStopped: make(chan struct{})}
+}
+
+func (*cleanupHandle) PID() int { return 4242 }
+
+func (h *cleanupHandle) Wait() error {
+	<-h.processStopped
+	return nil
+}
+
+func (h *cleanupHandle) Terminate() error {
+	h.mu.Lock()
+	h.terminated = true
+	h.mu.Unlock()
+	h.stopOnce.Do(func() { close(h.processStopped) })
+	return nil
+}
+
+func (h *cleanupHandle) Kill() error {
+	h.mu.Lock()
+	h.killed = true
+	h.mu.Unlock()
+	h.stopOnce.Do(func() { close(h.processStopped) })
+	return nil
+}
+
+func (h *cleanupHandle) cleanupSignals() (terminated, killed bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.terminated, h.killed
+}
+
+type cleanupLauncher struct {
+	handle *cleanupHandle
+}
+
+func (l cleanupLauncher) Start(
+	context.Context,
+	platform.LaunchRequest,
+) (platform.ProcessHandle, error) {
+	return l.handle, nil
+}
+
+type descendantInspector struct {
+	wrapper  dataplane.ProcessIdentity
+	child    dataplane.ProcessIdentity
+	rootPID  int
+	expected dataplane.ProcessIdentity
+	resolve  error
+}
+
+func (i *descendantInspector) Inspect(pid int) (dataplane.ProcessIdentity, error) {
+	if pid == i.child.PID {
+		return i.child, nil
+	}
+	return i.wrapper, nil
+}
+
+func (*descendantInspector) Signal(dataplane.ProcessIdentity, os.Signal) error { return nil }
+
+func (i *descendantInspector) ResolveDescendant(
+	_ context.Context,
+	rootPID int,
+	expected dataplane.ProcessIdentity,
+) (dataplane.ProcessIdentity, error) {
+	i.rootPID, i.expected = rootPID, expected
+	if i.resolve != nil {
+		return dataplane.ProcessIdentity{}, i.resolve
+	}
+	return i.child, nil
+}
+
+func TestSingBoxTUNStartTerminatesLauncherWhenChildIdentityCannotBeResolved(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("privileged launch wrapper is only used by non-root Fleet")
+	}
+	handle := newCleanupHandle()
+	inspector := &descendantInspector{
+		wrapper: dataplane.ProcessIdentity{
+			PID: 4242, Executable: "/usr/bin/sudo",
+			ArgsFingerprint: platform.FingerprintArgs([]string{"sudo", "-n", "env"}),
+		},
+		resolve: errors.New("process identity unavailable"),
+	}
+	box := &SingBox{
+		Binary:   "/opt/homebrew/bin/sing-box",
+		Launcher: cleanupLauncher{handle: handle}, Inspector: inspector,
+		Authorizer: acceptingAuthorizer{},
+	}
+	_, err := box.Start(t.Context(), dataplane.StartRequest{
+		ArtifactPath: "/tmp/config.json", RuntimeDir: t.TempDir(),
+		Mode: dataplane.ModeTUN, LeaseID: "lease",
+		Endpoint: dataplane.ListenEndpoint{Host: "127.0.0.1", Port: 7891},
+	})
+	if err == nil {
+		t.Fatal("Start() error = nil, want identity resolution failure")
+	}
+	terminated, killed := handle.cleanupSignals()
+	if !terminated || killed {
+		t.Fatalf("cleanup signals: terminated=%v killed=%v, want TERM without KILL", terminated, killed)
+	}
+}
+
+func TestSingBoxTUNStartRecordsPrivilegedChildIdentity(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("privileged launch wrapper is only used by non-root Fleet")
+	}
+	args := []string{
+		"/opt/homebrew/bin/sing-box", "run", "-c", "/tmp/config.json", "-D", t.TempDir(),
+	}
+	launcher := &adapterLauncher{}
+	inspector := &descendantInspector{
+		wrapper: dataplane.ProcessIdentity{
+			PID: 4242, Executable: "/usr/bin/sudo",
+			ArgsFingerprint: platform.FingerprintArgs([]string{"sudo", "-n", "env"}),
+		},
+		child: dataplane.ProcessIdentity{
+			PID: 5252, Executable: args[0],
+			ArgsFingerprint: platform.FingerprintArgs(args),
+		},
+	}
+	box := &SingBox{
+		Binary: args[0], Launcher: launcher, Inspector: inspector,
+		Authorizer: acceptingAuthorizer{},
+	}
+	instance, err := box.Start(t.Context(), dataplane.StartRequest{
+		ArtifactPath: args[3], RuntimeDir: args[5], Mode: dataplane.ModeTUN,
+		LeaseID: "lease", Endpoint: dataplane.ListenEndpoint{Host: "127.0.0.1", Port: 7891},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if instance.Process.PID != inspector.child.PID {
+		t.Fatalf("process = %#v, want child %#v", instance.Process, inspector.child)
+	}
+	if inspector.rootPID != 4242 ||
+		inspector.expected.ArgsFingerprint != inspector.child.ArgsFingerprint {
+		t.Fatalf("resolver root=%d expected=%#v", inspector.rootPID, inspector.expected)
+	}
 }
 
 func TestSingBoxImplementsDataPlaneRenderAndStart(t *testing.T) {

@@ -28,6 +28,14 @@ type ProcessInspector interface {
 	Signal(dataplane.ProcessIdentity, os.Signal) error
 }
 
+type DescendantProcessResolver interface {
+	ResolveDescendant(
+		context.Context,
+		int,
+		dataplane.ProcessIdentity,
+	) (dataplane.ProcessIdentity, error)
+}
+
 type ExecProcessInspector struct{}
 
 func (ExecProcessInspector) Inspect(pid int) (dataplane.ProcessIdentity, error) {
@@ -70,11 +78,93 @@ func SameProcess(current, expected dataplane.ProcessIdentity) bool {
 	if current.PID <= 0 || current.PID != expected.PID {
 		return false
 	}
+	return sameProcessSignature(current, expected)
+}
+
+func sameProcessSignature(current, expected dataplane.ProcessIdentity) bool {
 	if expected.Executable != "" &&
 		filepath.Clean(current.Executable) != filepath.Clean(expected.Executable) {
 		return false
 	}
 	return expected.ArgsFingerprint == "" || current.ArgsFingerprint == expected.ArgsFingerprint
+}
+
+func (ExecProcessInspector) ResolveDescendant(
+	ctx context.Context,
+	rootPID int,
+	expected dataplane.ProcessIdentity,
+) (dataplane.ProcessIdentity, error) {
+	resolveCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		output, err := exec.CommandContext(
+			resolveCtx, "ps", "-axo", "pid=,ppid=,comm=,args=",
+		).Output()
+		if err == nil {
+			if identity, findErr := FindDescendantProcess(
+				string(output), rootPID, expected,
+			); findErr == nil {
+				return identity, nil
+			}
+		}
+		select {
+		case <-resolveCtx.Done():
+			return dataplane.ProcessIdentity{}, resolveCtx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+type processRecord struct {
+	parent   int
+	identity dataplane.ProcessIdentity
+}
+
+func FindDescendantProcess(
+	output string,
+	rootPID int,
+	expected dataplane.ProcessIdentity,
+) (dataplane.ProcessIdentity, error) {
+	records := make(map[int]processRecord)
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 4 {
+			continue
+		}
+		pid, pidErr := strconv.Atoi(fields[0])
+		parent, parentErr := strconv.Atoi(fields[1])
+		if pidErr != nil || parentErr != nil {
+			continue
+		}
+		args := fields[3:]
+		records[pid] = processRecord{
+			parent: parent,
+			identity: dataplane.ProcessIdentity{
+				PID: pid, Executable: args[0],
+				ArgsFingerprint: FingerprintArgs(args),
+			},
+		}
+	}
+	descendants := map[int]bool{rootPID: true}
+	for changed := true; changed; {
+		changed = false
+		for pid, record := range records {
+			if !descendants[pid] && descendants[record.parent] {
+				descendants[pid] = true
+				changed = true
+			}
+		}
+	}
+	for pid, record := range records {
+		if pid != rootPID && descendants[pid] &&
+			sameProcessSignature(record.identity, expected) {
+			return record.identity, nil
+		}
+	}
+	return dataplane.ProcessIdentity{}, os.ErrNotExist
 }
 
 type LaunchRequest struct {
@@ -88,6 +178,7 @@ type LaunchRequest struct {
 type ProcessHandle interface {
 	PID() int
 	Wait() error
+	Terminate() error
 	Kill() error
 }
 
@@ -139,6 +230,9 @@ type execHandle struct{ cmd *exec.Cmd }
 
 func (h execHandle) PID() int    { return h.cmd.Process.Pid }
 func (h execHandle) Wait() error { return h.cmd.Wait() }
+func (h execHandle) Terminate() error {
+	return h.cmd.Process.Signal(syscall.SIGTERM)
+}
 func (h execHandle) Kill() error { return h.cmd.Process.Kill() }
 
 func ParseProcessList(output string) []dataplane.ProcessIdentity {

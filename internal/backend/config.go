@@ -135,7 +135,7 @@ func BuildTUNConfig(node model.Node, port int) (map[string]any, error) {
 					"type": "https", "tag": "dns-remote", "server": "1.1.1.1",
 					"path": "/dns-query", "detour": "proxy",
 				},
-				map[string]any{"type": "local", "tag": "dns-local"},
+				map[string]any{"type": "local", "tag": "dns-local", "prefer_go": true},
 			},
 			"final": "dns-remote", "strategy": "ipv4_only", "reverse_mapping": true,
 		},

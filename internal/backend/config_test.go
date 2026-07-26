@@ -64,7 +64,7 @@ func TestTUNConfigUsesCurrentDNSServerFormat(t *testing.T) {
 			"type": "https", "tag": "dns-remote", "server": "1.1.1.1",
 			"path": "/dns-query", "detour": "proxy",
 		},
-		map[string]any{"type": "local", "tag": "dns-local"},
+		map[string]any{"type": "local", "tag": "dns-local", "prefer_go": true},
 	}
 	gotJSON, _ := json.Marshal(servers)
 	wantJSON, _ := json.Marshal(want)
