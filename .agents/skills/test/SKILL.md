@@ -9,39 +9,56 @@ description: >
 
 执行项目的完整 Go 验证流程，包括构建、静态检查、单元测试和竞态检测。
 
-## 1. 构建
+## 1. 编译 / 类型检查
 
 ```bash
 go build -trimpath -o dist/fleet ./cmd/fleet
-```
-
-确认 CLI 构建成功。`dist/fleet` 是本地生成产物，不应提交。
-
-## 2. 静态检查
-
-```bash
 go vet ./...
 ```
 
-确认所有 Go package 均通过静态检查。
+确认 CLI 构建成功且所有 Go package 均通过静态检查。`dist/fleet` 是本地生成产物，不应提交。
 
-## 3. 运行测试
+## 2. 运行单元测试（按层级选择）
 
-先运行完整测试：
+Fleet 尚未划分独立的快速测试套件；smoke 和 core 均使用完整 Go 测试命令，full 在此基础上追加竞态检测。
+
+### smoke（目标 <5s）
 
 ```bash
 go test ./...
 ```
 
-再使用竞态检测器复核：
+适用场景：
+- code-task 内循环
+- 保存即跑 / 频繁反馈
+- 仅断言项目结构、配置、模板契约
+
+### core（目标 <15s）
 
 ```bash
+go test ./...
+```
+
+适用场景：
+- pre-commit hook（自动调用）
+- 写 code.md / code-r{N}.md 报告前的最终验证
+- 推送 PR 前的本地把关
+
+### full（完整测试套件）
+
+```bash
+go test ./...
 go test -race ./...
 ```
 
+适用场景：
+- release / tag 前
+- CI
+- main 合并前的最终把关
+
 `go test ./...` 自动覆盖仓库内所有 Go package，包括 `tests/compat`。新增的 `*_test.go` 文件只要位于模块 package 中，就会被完整测试命令纳入。
 
-## 4. 输出结果
+## 3. 输出结果
 
 报告测试结果摘要：
 - 运行的总测试数
