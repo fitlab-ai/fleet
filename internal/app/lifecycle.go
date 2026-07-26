@@ -191,6 +191,9 @@ func configureLauncher(cmd *exec.Cmd, mode string, euid int) {
 }
 
 func (a *App) Start(target, mode string) int {
+	if a.Runtime != nil {
+		return a.startManaged(target, mode, true)
+	}
 	if _, err := a.stop(false); err != nil {
 		a.printf("Could not stop the running instance: %s\n", err)
 		return 1
@@ -359,6 +362,19 @@ func (a *App) stop(verbose bool) (bool, error) {
 }
 
 func (a *App) Stop() int {
+	if a.Runtime != nil {
+		stopped, err := a.Runtime.Stop(context.Background())
+		if err != nil {
+			a.printf("✗ Failed to stop: %s\n", err)
+			return 1
+		}
+		if stopped {
+			a.printf("✓ Stopped and restored system proxy\n")
+		} else {
+			a.printf("System proxy cleaned\n")
+		}
+		return 0
+	}
 	if _, err := a.stop(true); err != nil {
 		return 1
 	}
@@ -366,6 +382,9 @@ func (a *App) Stop() int {
 }
 
 func (a *App) Switch(target, mode string) int {
+	if a.Runtime != nil {
+		return a.switchManaged(target, mode)
+	}
 	if mode == "" {
 		if state, _ := a.LoadState(); state != nil {
 			mode = state.Mode
@@ -391,6 +410,9 @@ func (a *App) Switch(target, mode string) int {
 }
 
 func (a *App) Status() int {
+	if a.Runtime != nil {
+		return a.statusManaged()
+	}
 	state, _ := a.LoadState()
 	pid := a.findSingBox()
 	if pid > 0 && state != nil {

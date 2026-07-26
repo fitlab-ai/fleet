@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -14,7 +15,9 @@ import (
 
 	"github.com/fitlab-ai/fleet/internal/backend"
 	"github.com/fitlab-ai/fleet/internal/credential"
+	"github.com/fitlab-ai/fleet/internal/dataplane"
 	"github.com/fitlab-ai/fleet/internal/model"
+	fleetruntime "github.com/fitlab-ai/fleet/internal/runtime"
 	"github.com/fitlab-ai/fleet/internal/store"
 	"github.com/fitlab-ai/fleet/internal/subscription"
 )
@@ -25,11 +28,14 @@ type Config struct {
 	ClashConfig string
 	Port        int
 	Timeout     time.Duration
+	Backend     dataplane.BackendID
 }
 
 type App struct {
 	Config      Config
 	Credentials credential.Backend
+	DataPlanes  *dataplane.Registry
+	Runtime     *fleetruntime.Manager
 	Out         io.Writer
 	In          io.Reader
 	healthProbe func(model.Node) (string, int64)
@@ -60,7 +66,7 @@ func DefaultConfig() Config {
 		Dir:         filepath.Join(home, ".config", "fleet"),
 		SingBox:     "/opt/homebrew/bin/sing-box",
 		ClashConfig: filepath.Join(home, "Library", "Application Support", "com.follow.clash", "config.yaml"),
-		Port:        port, Timeout: timeout,
+		Port:        port, Timeout: timeout, Backend: "sing-box",
 	}
 }
 
@@ -224,6 +230,42 @@ func (a *App) Export(target, mode string) int {
 		a.printf("%s\n", err)
 		return 1
 	}
+	if a.DataPlanes != nil {
+		plane, planeErr := a.DataPlanes.Configured(a.Config.Backend)
+		if planeErr != nil {
+			a.printf("%s\n", planeErr)
+			return 1
+		}
+		requestMode := dataplane.Mode(mode)
+		endpoint := dataplane.ListenEndpoint{Network: "tcp", Host: backend.Host, Port: a.Config.Port}
+		validate := dataplane.ValidateRequest{
+			Backend: plane.ID(), Purpose: dataplane.ValidationExport,
+			Mode: requestMode, Nodes: []model.Node{node}, Endpoint: endpoint,
+		}
+		capabilities, capabilityErr := plane.Capabilities(context.Background())
+		if capabilityErr != nil {
+			a.printf("%s\n", capabilityErr)
+			return 1
+		}
+		if err := capabilities.Require(validate); err != nil {
+			a.printf("%s\n", err)
+			return 1
+		}
+		if err := plane.Validate(context.Background(), validate); err != nil {
+			a.printf("%s\n", err)
+			return 1
+		}
+		artifact, renderErr := plane.Render(context.Background(), dataplane.RenderRequest{
+			Backend: plane.ID(), Purpose: dataplane.ValidationExport,
+			Mode: requestMode, Node: node, Endpoint: endpoint,
+		})
+		if renderErr != nil {
+			a.printf("%s\n", renderErr)
+			return 1
+		}
+		a.printf("%s", artifact.Bytes)
+		return 0
+	}
 	config, err := backend.Export(node, mode, a.Config.Port)
 	if err != nil {
 		a.printf("%s\n", err)
@@ -303,7 +345,32 @@ func (a *App) validateWithSingBox(nodes []model.Node) error {
 	if a.validate != nil {
 		return a.validate(nodes, a.Config.Port)
 	}
+	if a.DataPlanes != nil {
+		return a.validateForRefresh(context.Background(), nodes)
+	}
 	return (backend.SingBox{Binary: a.Config.SingBox}).ValidateNodes(nodes, a.Config.Port)
+}
+
+func (a *App) validateForRefresh(ctx context.Context, nodes []model.Node) error {
+	plane, err := a.DataPlanes.Configured(a.Config.Backend)
+	if err != nil {
+		return err
+	}
+	request := dataplane.ValidateRequest{
+		Backend: plane.ID(), Purpose: dataplane.ValidationRefresh,
+		Nodes: nodes,
+		Endpoint: dataplane.ListenEndpoint{
+			Network: "tcp", Host: backend.Host, Port: a.Config.Port,
+		},
+	}
+	capabilities, err := plane.Capabilities(ctx)
+	if err != nil {
+		return err
+	}
+	if err := capabilities.Require(request); err != nil {
+		return err
+	}
+	return plane.Validate(ctx, request)
 }
 
 func (a *App) publishGeneration(root string, source []byte, nodes []model.Node) (string, error) {

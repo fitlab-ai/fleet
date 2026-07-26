@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/fitlab-ai/fleet/internal/backend"
+	"github.com/fitlab-ai/fleet/internal/dataplane"
 	"github.com/fitlab-ai/fleet/internal/model"
 )
 
@@ -84,7 +85,11 @@ func (a *App) Health(target string) int {
 	for _, node := range targets {
 		probe := a.healthProbe
 		if probe == nil {
-			probe = a.probeHealth
+			if a.DataPlanes != nil {
+				probe = a.probeHealthDataPlane
+			} else {
+				probe = a.probeHealth
+			}
 		}
 		status, elapsed := probe(node)
 		if status != "HEALTHY" {
@@ -100,6 +105,50 @@ func (a *App) Health(target string) int {
 		return 1
 	}
 	return 0
+}
+
+func (a *App) probeHealthDataPlane(node model.Node) (string, int64) {
+	plane, err := a.DataPlanes.Configured(a.Config.Backend)
+	if err != nil {
+		return "DEPENDENCY_ERROR", -1
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	validate := dataplane.ValidateRequest{
+		Backend: plane.ID(), Purpose: dataplane.ValidationProbe,
+		Mode: dataplane.ModeProxy, Nodes: []model.Node{node},
+	}
+	capabilities, err := plane.Capabilities(ctx)
+	if err != nil {
+		return "DEPENDENCY_ERROR", -1
+	}
+	if err := capabilities.Require(validate); err != nil {
+		return "CONFIG_ERROR", -1
+	}
+	if err := plane.Validate(ctx, validate); err != nil {
+		if dataplane.IsCode(err, dataplane.CodeDependency) {
+			return "DEPENDENCY_ERROR", -1
+		}
+		return "CONFIG_ERROR", -1
+	}
+	result, err := plane.Probe(ctx, dataplane.ProbeRequest{
+		Kind: dataplane.ProbeOutbound, Node: &node,
+		Target: os.Getenv("FLEET_HEALTH_URL"),
+	})
+	if err != nil {
+		if dataplane.IsCode(err, dataplane.CodeDependency) {
+			return "DEPENDENCY_ERROR", -1
+		}
+		return "START_FAILED", -1
+	}
+	elapsed := result.Latency.Milliseconds()
+	if result.Status == dataplane.HealthHealthy {
+		return "HEALTHY", elapsed
+	}
+	if result.Reason == dataplane.CodeStart {
+		return "START_FAILED", -1
+	}
+	return "UNHEALTHY", elapsed
 }
 
 func (a *App) probeHealth(node model.Node) (string, int64) {
