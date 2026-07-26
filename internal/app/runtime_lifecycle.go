@@ -11,6 +11,52 @@ import (
 	fleetruntime "github.com/fitlab-ai/fleet/internal/runtime"
 )
 
+func (a *App) requireRuntime() bool {
+	if a.Runtime != nil {
+		return true
+	}
+	a.printf("Runtime manager is not configured\n")
+	return false
+}
+
+func (a *App) Start(target, mode string) int {
+	if !a.requireRuntime() {
+		return 1
+	}
+	return a.startManaged(target, mode, true)
+}
+
+func (a *App) Stop() int {
+	if !a.requireRuntime() {
+		return 1
+	}
+	stopped, err := a.Runtime.Stop(context.Background())
+	if err != nil {
+		a.printf("✗ Failed to stop: %s\n", err)
+		return 1
+	}
+	if stopped {
+		a.printf("✓ Stopped and restored system proxy\n")
+	} else {
+		a.printf("System proxy cleaned\n")
+	}
+	return 0
+}
+
+func (a *App) Switch(target, mode string) int {
+	if !a.requireRuntime() {
+		return 1
+	}
+	return a.switchManaged(target, mode)
+}
+
+func (a *App) Status() int {
+	if !a.requireRuntime() {
+		return 1
+	}
+	return a.statusManaged()
+}
+
 func (a *App) startManaged(target, mode string, stopExisting bool) int {
 	ctx := context.Background()
 	if stopExisting {

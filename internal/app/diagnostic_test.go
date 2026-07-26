@@ -2,12 +2,11 @@ package app
 
 import (
 	"bytes"
-	"errors"
 	"net"
-	"os"
 	"strings"
 	"testing"
 
+	"github.com/fitlab-ai/fleet/internal/dataplane"
 	"github.com/fitlab-ai/fleet/internal/model"
 	"github.com/fitlab-ai/fleet/internal/store"
 )
@@ -44,12 +43,19 @@ func TestHealthKeepsOrderAndReturnsNonzero(t *testing.T) {
 		{Name: "second", Type: "vmess"},
 	}
 	app, out := diagnosticApp(t, nodes)
-	app.healthProbe = func(node model.Node) (string, int64) {
+	plane := &refreshPlane{id: "sing-box"}
+	plane.probe = func(node model.Node) (dataplane.HealthResult, error) {
 		if node.Name == "first" {
-			return "HEALTHY", 1
+			return dataplane.HealthResult{Status: dataplane.HealthHealthy}, nil
 		}
-		return "UNHEALTHY", 2
+		return dataplane.HealthResult{Status: dataplane.HealthUnhealthy}, nil
 	}
+	registry, err := dataplane.NewRegistry("sing-box", plane)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.DataPlanes = registry
+	app.Config.Backend = "sing-box"
 	if code := app.Health(""); code != 1 {
 		t.Fatalf("code=%d, want 1", code)
 	}
@@ -60,32 +66,41 @@ func TestHealthKeepsOrderAndReturnsNonzero(t *testing.T) {
 }
 
 func TestHealthRetriesAfterEarlyCoreExit(t *testing.T) {
-	app := &App{}
+	app, _ := diagnosticApp(t, []model.Node{{Name: "node", Type: "vmess"}})
 	attempts := 0
-	app.healthTry = func(model.Node) (string, int64, bool) {
+	plane := &refreshPlane{id: "sing-box"}
+	plane.probe = func(model.Node) (dataplane.HealthResult, error) {
 		attempts++
 		if attempts == 1 {
-			return "START_FAILED", -1, true
+			return dataplane.HealthResult{}, dataplane.NewError(
+				dataplane.CodeStart, "probe", "sing-box",
+				"Data plane exited during the health probe", nil,
+			)
 		}
-		return "HEALTHY", 7, false
+		return dataplane.HealthResult{Status: dataplane.HealthHealthy}, nil
 	}
-	status, elapsed := app.probeHealth(model.Node{Name: "node"})
-	if status != "HEALTHY" || elapsed != 7 || attempts != 2 {
-		t.Fatalf("status=%s elapsed=%d attempts=%d", status, elapsed, attempts)
-	}
-}
-
-func TestHealthReportsConfigWriteFailure(t *testing.T) {
-	binary, err := os.Executable()
+	registry, err := dataplane.NewRegistry("sing-box", plane)
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := &App{Config: Config{SingBox: binary}}
-	app.writeFile = func(string, []byte, os.FileMode) error {
-		return errors.New("disk full")
+	app.DataPlanes = registry
+	app.Config.Backend = "sing-box"
+
+	if code := app.Health(""); code != 0 {
+		t.Fatalf("code=%d, want 0", code)
 	}
-	status, elapsed, retry := app.probeHealthAttempt(model.Node{Name: "node"})
-	if status != "CONFIG_ERROR" || elapsed != -1 || retry {
-		t.Fatalf("status=%s elapsed=%d retry=%v", status, elapsed, retry)
+	if attempts != 2 {
+		t.Fatalf("probe attempts=%d, want 2", attempts)
+	}
+}
+
+func TestHealthRequiresDataPlaneRegistry(t *testing.T) {
+	app, out := diagnosticApp(t, []model.Node{{Name: "node", Type: "vmess"}})
+
+	if code := app.Health(""); code != 1 {
+		t.Fatalf("code=%d, want 1", code)
+	}
+	if !strings.Contains(out.String(), "Data plane registry is not configured") {
+		t.Fatalf("missing dependency error: %q", out.String())
 	}
 }

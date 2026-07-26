@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -38,13 +37,9 @@ type App struct {
 	Runtime     *fleetruntime.Manager
 	Out         io.Writer
 	In          io.Reader
-	healthProbe func(model.Node) (string, int64)
-	healthTry   func(model.Node) (string, int64, bool)
 	download    func(string) ([]byte, error)
-	validate    func([]model.Node, int) error
 	publish     func(string, []byte, []model.Node) (string, error)
 	writeState  func(string, string, RecordState) error
-	writeFile   func(string, []byte, os.FileMode) error
 }
 
 func DefaultConfig() Config {
@@ -215,9 +210,13 @@ func (a *App) List() int {
 		a.printf("  %2d %-30s %-20s %-8s %-10s %-30s\n", i, node.Name, source, status, node.Type, node.Server)
 	}
 	a.printf("%s\nTotal: %d nodes\n", strings.Repeat("-", 80), len(nodes))
-	state, _ := a.LoadState()
-	if state != nil {
-		a.printf("Mode: %s  |  Node: %s  |  PID: %d\n", state.Mode, state.NodeKey, state.PID)
+	if a.Runtime != nil {
+		state, _, err := a.Runtime.Status(context.Background())
+		if err == nil {
+			a.printf("Mode: %s  |  Node: %s  |  PID: %d\n", state.Mode, state.Node.Key, state.Instance.Process.PID)
+		} else {
+			a.printf("Not running\n")
+		}
 	} else {
 		a.printf("Not running\n")
 	}
@@ -230,49 +229,43 @@ func (a *App) Export(target, mode string) int {
 		a.printf("%s\n", err)
 		return 1
 	}
-	if a.DataPlanes != nil {
-		plane, planeErr := a.DataPlanes.Configured(a.Config.Backend)
-		if planeErr != nil {
-			a.printf("%s\n", planeErr)
-			return 1
-		}
-		requestMode := dataplane.Mode(mode)
-		endpoint := dataplane.ListenEndpoint{Network: "tcp", Host: backend.Host, Port: a.Config.Port}
-		validate := dataplane.ValidateRequest{
-			Backend: plane.ID(), Purpose: dataplane.ValidationExport,
-			Mode: requestMode, Nodes: []model.Node{node}, Endpoint: endpoint,
-		}
-		capabilities, capabilityErr := plane.Capabilities(context.Background())
-		if capabilityErr != nil {
-			a.printf("%s\n", capabilityErr)
-			return 1
-		}
-		if err := capabilities.Require(validate); err != nil {
-			a.printf("%s\n", err)
-			return 1
-		}
-		if err := plane.Validate(context.Background(), validate); err != nil {
-			a.printf("%s\n", err)
-			return 1
-		}
-		artifact, renderErr := plane.Render(context.Background(), dataplane.RenderRequest{
-			Backend: plane.ID(), Purpose: dataplane.ValidationExport,
-			Mode: requestMode, Node: node, Endpoint: endpoint,
-		})
-		if renderErr != nil {
-			a.printf("%s\n", renderErr)
-			return 1
-		}
-		a.printf("%s", artifact.Bytes)
-		return 0
+	if a.DataPlanes == nil {
+		a.printf("Data plane registry is not configured\n")
+		return 1
 	}
-	config, err := backend.Export(node, mode, a.Config.Port)
-	if err != nil {
+	plane, planeErr := a.DataPlanes.Configured(a.Config.Backend)
+	if planeErr != nil {
+		a.printf("%s\n", planeErr)
+		return 1
+	}
+	requestMode := dataplane.Mode(mode)
+	endpoint := dataplane.ListenEndpoint{Network: "tcp", Host: backend.Host, Port: a.Config.Port}
+	validate := dataplane.ValidateRequest{
+		Backend: plane.ID(), Purpose: dataplane.ValidationExport,
+		Mode: requestMode, Nodes: []model.Node{node}, Endpoint: endpoint,
+	}
+	capabilities, capabilityErr := plane.Capabilities(context.Background())
+	if capabilityErr != nil {
+		a.printf("%s\n", capabilityErr)
+		return 1
+	}
+	if err := capabilities.Require(validate); err != nil {
 		a.printf("%s\n", err)
 		return 1
 	}
-	data, _ := json.MarshalIndent(config, "", "  ")
-	a.printf("%s\n", data)
+	if err := plane.Validate(context.Background(), validate); err != nil {
+		a.printf("%s\n", err)
+		return 1
+	}
+	artifact, renderErr := plane.Render(context.Background(), dataplane.RenderRequest{
+		Backend: plane.ID(), Purpose: dataplane.ValidationExport,
+		Mode: requestMode, Node: node, Endpoint: endpoint,
+	})
+	if renderErr != nil {
+		a.printf("%s\n", renderErr)
+		return 1
+	}
+	a.printf("%s", artifact.Bytes)
 	return 0
 }
 
@@ -341,17 +334,13 @@ func (a *App) downloadSource(rawURL string) ([]byte, error) {
 	return (subscription.Downloader{Timeout: a.Config.Timeout}).Download(rawURL)
 }
 
-func (a *App) validateWithSingBox(nodes []model.Node) error {
-	if a.validate != nil {
-		return a.validate(nodes, a.Config.Port)
-	}
-	if a.DataPlanes != nil {
-		return a.validateForRefresh(context.Background(), nodes)
-	}
-	return (backend.SingBox{Binary: a.Config.SingBox}).ValidateNodes(nodes, a.Config.Port)
-}
-
 func (a *App) validateForRefresh(ctx context.Context, nodes []model.Node) error {
+	if a.DataPlanes == nil {
+		return dataplane.NewError(
+			dataplane.CodeDependency, "refresh", a.Config.Backend,
+			"Data plane registry is not configured", nil,
+		)
+	}
 	plane, err := a.DataPlanes.Configured(a.Config.Backend)
 	if err != nil {
 		return err
@@ -510,7 +499,7 @@ func (a *App) Refresh(selector string, force bool) int {
 			itemErr = subscription.EnforceNodeCount(len(nodes), state.NodeCount, force)
 		}
 		if itemErr == nil {
-			itemErr = a.validateWithSingBox(nodes)
+			itemErr = a.validateForRefresh(context.Background(), nodes)
 		}
 		if itemErr == nil {
 			var generation string
@@ -569,7 +558,7 @@ func (a *App) SubscriptionMigrate(sourcePath, rawURL, name string) int {
 		err = model.NewError("credential", "Subscription URL could not be recovered; use --url", nil)
 	}
 	if err == nil {
-		err = a.validateWithSingBox(nodes)
+		err = a.validateForRefresh(context.Background(), nodes)
 	}
 	if err != nil {
 		a.printf("Migration failed [%s]: %s\n", safeCategory(err, "migration"), err)
@@ -609,14 +598,6 @@ func (a *App) SubscriptionMigrate(sourcePath, rawURL, name string) int {
 	}
 	a.printf("✓ Migrated %s (%s): 44 nodes (vmess: 29, hysteria2: 4, anytls: 11, trojan: 0)\n", record.Name, record.ID[:8])
 	return 0
-}
-
-func (a *App) LoadState() (*model.RuntimeState, error) {
-	var state model.RuntimeState
-	if err := store.ReadJSON(filepath.Join(a.Config.Dir, "state.json"), &state); err != nil {
-		return nil, err
-	}
-	return &state, nil
 }
 
 func (a *App) SortedNodes() []model.Node {
