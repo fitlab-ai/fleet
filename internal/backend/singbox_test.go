@@ -104,6 +104,52 @@ type acceptingAuthorizer struct{}
 
 func (acceptingAuthorizer) Authorize(context.Context) error { return nil }
 
+type exitedHandle struct {
+	pid int
+	err error
+}
+
+func (h exitedHandle) PID() int       { return h.pid }
+func (h exitedHandle) Wait() error    { return h.err }
+func (exitedHandle) Terminate() error { return nil }
+func (exitedHandle) Kill() error      { return nil }
+
+type exitedLauncher struct {
+	handle exitedHandle
+}
+
+func (l exitedLauncher) Start(
+	context.Context,
+	platform.LaunchRequest,
+) (platform.ProcessHandle, error) {
+	return l.handle, nil
+}
+
+type waitingDescendantInspector struct{}
+
+func (waitingDescendantInspector) Inspect(int) (dataplane.ProcessIdentity, error) {
+	return dataplane.ProcessIdentity{
+		PID: 4242, Executable: "/usr/bin/sudo",
+		ArgsFingerprint: platform.FingerprintArgs([]string{"sudo", "-n", "env"}),
+	}, nil
+}
+
+func (waitingDescendantInspector) Signal(
+	dataplane.ProcessIdentity,
+	os.Signal,
+) error {
+	return nil
+}
+
+func (waitingDescendantInspector) ResolveDescendant(
+	ctx context.Context,
+	_ int,
+	_ dataplane.ProcessIdentity,
+) (dataplane.ProcessIdentity, error) {
+	<-ctx.Done()
+	return dataplane.ProcessIdentity{}, ctx.Err()
+}
+
 type cleanupHandle struct {
 	mu             sync.Mutex
 	terminated     bool
@@ -146,13 +192,17 @@ func (h *cleanupHandle) cleanupSignals() (terminated, killed bool) {
 }
 
 type cleanupLauncher struct {
-	handle *cleanupHandle
+	handle  *cleanupHandle
+	request *platform.LaunchRequest
 }
 
 func (l cleanupLauncher) Start(
-	context.Context,
-	platform.LaunchRequest,
+	_ context.Context,
+	request platform.LaunchRequest,
 ) (platform.ProcessHandle, error) {
+	if l.request != nil {
+		*l.request = request
+	}
 	return l.handle, nil
 }
 
@@ -223,7 +273,10 @@ func TestSingBoxTUNStartRecordsPrivilegedChildIdentity(t *testing.T) {
 	args := []string{
 		"/opt/homebrew/bin/sing-box", "run", "-c", "/tmp/config.json", "-D", t.TempDir(),
 	}
-	launcher := &adapterLauncher{}
+	handle := newCleanupHandle()
+	var launchRequest platform.LaunchRequest
+	launcher := cleanupLauncher{handle: handle, request: &launchRequest}
+	t.Cleanup(func() { _ = handle.Terminate() })
 	inspector := &descendantInspector{
 		wrapper: dataplane.ProcessIdentity{
 			PID: 4242, Executable: "/usr/bin/sudo",
@@ -251,6 +304,37 @@ func TestSingBoxTUNStartRecordsPrivilegedChildIdentity(t *testing.T) {
 	if inspector.rootPID != 4242 ||
 		inspector.expected.ArgsFingerprint != inspector.child.ArgsFingerprint {
 		t.Fatalf("resolver root=%d expected=%#v", inspector.rootPID, inspector.expected)
+	}
+	if launchRequest.NewSession {
+		t.Fatal("TUN sudo launcher detached from the authorizing terminal session")
+	}
+	if !launchRequest.NewProcessGroup {
+		t.Fatal("TUN sudo launcher did not isolate the data-plane process group")
+	}
+}
+
+func TestSingBoxTUNStartReportsLauncherExitBeforeIdentityFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("privileged launch wrapper is only used by non-root Fleet")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+	box := &SingBox{
+		Binary: "/opt/homebrew/bin/sing-box",
+		Launcher: exitedLauncher{handle: exitedHandle{
+			pid: 4242, err: errors.New("exit status 1"),
+		}},
+		Inspector: waitingDescendantInspector{}, Authorizer: acceptingAuthorizer{},
+	}
+	_, err := box.Start(ctx, dataplane.StartRequest{
+		ArtifactPath: "/tmp/config.json", RuntimeDir: t.TempDir(),
+		Mode: dataplane.ModeTUN, LeaseID: "lease",
+		Endpoint: dataplane.ListenEndpoint{Host: "127.0.0.1", Port: 7891},
+	})
+	var planeErr *dataplane.Error
+	if !errors.As(err, &planeErr) || planeErr.Code != dataplane.CodeStart ||
+		planeErr.PublicMessage != "Could not start sing-box" {
+		t.Fatalf("error = %#v, want classified launcher exit", err)
 	}
 }
 

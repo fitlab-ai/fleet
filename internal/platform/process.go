@@ -168,11 +168,12 @@ func FindDescendantProcess(
 }
 
 type LaunchRequest struct {
-	Command     []string
-	Environment map[string]string
-	Stdout      io.Writer
-	Stderr      io.Writer
-	NewSession  bool
+	Command         []string
+	Environment     map[string]string
+	Stdout          io.Writer
+	Stderr          io.Writer
+	NewSession      bool
+	NewProcessGroup bool
 }
 
 type ProcessHandle interface {
@@ -219,6 +220,8 @@ func (ExecLauncher) Start(ctx context.Context, request LaunchRequest) (ProcessHa
 	cmd.Stdout, cmd.Stderr = request.Stdout, request.Stderr
 	if request.NewSession {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	} else if request.NewProcessGroup {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	}
 	if err := cmd.Start(); err != nil {
 		return nil, err

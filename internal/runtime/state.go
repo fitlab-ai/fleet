@@ -16,6 +16,9 @@ import (
 const (
 	SchemaV1Legacy uint32 = 1
 	SchemaV2       uint32 = 2
+
+	ResourceSnapshotLegacy      uint32 = 0
+	ResourceSnapshotOwnershipV1 uint32 = 1
 )
 
 type Phase string
@@ -52,17 +55,19 @@ type NodeRef struct {
 }
 
 type State struct {
-	Schema         uint32                    `json:"schema,omitempty"`
-	Phase          Phase                     `json:"phase,omitempty"`
-	LeaseID        string                    `json:"lease_id,omitempty"`
-	Instance       dataplane.Instance        `json:"instance,omitempty"`
-	Node           NodeRef                   `json:"node_ref,omitempty"`
-	Mode           dataplane.Mode            `json:"mode,omitempty"`
-	Port           int                       `json:"port,omitempty"`
-	Claims         []Claim                   `json:"claims,omitempty"`
-	ResourceBefore platform.ResourceSnapshot `json:"resource_before,omitempty"`
-	LastError      string                    `json:"last_error,omitempty"`
-	UpdatedAt      time.Time                 `json:"updated_at,omitempty"`
+	Schema                  uint32                    `json:"schema,omitempty"`
+	Phase                   Phase                     `json:"phase,omitempty"`
+	LeaseID                 string                    `json:"lease_id,omitempty"`
+	Instance                dataplane.Instance        `json:"instance,omitempty"`
+	Node                    NodeRef                   `json:"node_ref,omitempty"`
+	Mode                    dataplane.Mode            `json:"mode,omitempty"`
+	Port                    int                       `json:"port,omitempty"`
+	Claims                  []Claim                   `json:"claims,omitempty"`
+	ResourceBefore          platform.ResourceSnapshot `json:"resource_before,omitempty"`
+	ResourceOwned           platform.ResourceSnapshot `json:"resource_owned,omitempty"`
+	ResourceSnapshotVersion uint32                    `json:"resource_snapshot_version,omitempty"`
+	LastError               string                    `json:"last_error,omitempty"`
+	UpdatedAt               time.Time                 `json:"updated_at,omitempty"`
 
 	NodeName          string                 `json:"node,omitempty"`
 	NodeKey           string                 `json:"node_key,omitempty"`

@@ -23,6 +23,12 @@ type ResourceInspector interface {
 	Snapshot(context.Context, []dataplane.ResourceKind) (ResourceSnapshot, error)
 }
 
+// LegacyResourceSnapshotter reproduces the opaque snapshot format persisted by
+// schema-v2 releases before resource ownership was recorded separately.
+type LegacyResourceSnapshotter interface {
+	SnapshotLegacy(context.Context, []dataplane.ResourceKind) (ResourceSnapshot, error)
+}
+
 type ExecResourceInspector struct{}
 
 func (ExecResourceInspector) PortOwner(ctx context.Context, endpoint dataplane.ListenEndpoint) (dataplane.ProcessIdentity, error) {
@@ -70,6 +76,21 @@ func ParseLsofOwner(output string) (dataplane.ProcessIdentity, error) {
 }
 
 func (ExecResourceInspector) Snapshot(ctx context.Context, kinds []dataplane.ResourceKind) (ResourceSnapshot, error) {
+	return snapshotResources(ctx, kinds, false)
+}
+
+func (ExecResourceInspector) SnapshotLegacy(
+	ctx context.Context,
+	kinds []dataplane.ResourceKind,
+) (ResourceSnapshot, error) {
+	return snapshotResources(ctx, kinds, true)
+}
+
+func snapshotResources(
+	ctx context.Context,
+	kinds []dataplane.ResourceKind,
+	legacy bool,
+) (ResourceSnapshot, error) {
 	snapshot := ResourceSnapshot{}
 	for _, kind := range kinds {
 		var command []string
@@ -87,9 +108,59 @@ func (ExecResourceInspector) Snapshot(ctx context.Context, kinds []dataplane.Res
 		if err != nil {
 			return nil, err
 		}
-		snapshot[kind] = FingerprintLines(string(output))
+		snapshot[kind] = fingerprintResourceOutput(kind, string(output), legacy)
 	}
 	return snapshot, nil
+}
+
+func fingerprintResourceOutput(
+	kind dataplane.ResourceKind,
+	output string,
+	legacy bool,
+) []string {
+	if legacy {
+		return FingerprintLines(output)
+	}
+	switch kind {
+	case dataplane.ResourceRoute:
+		return FingerprintRouteLines(output)
+	case dataplane.ResourceTUN:
+		return FingerprintInterfaceNames(output)
+	default:
+		return FingerprintLines(output)
+	}
+}
+
+func FingerprintRouteLines(output string) []string {
+	var stable []string
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 4 || fields[0] == "Destination" {
+			continue
+		}
+		if _, err := strconv.Atoi(fields[len(fields)-1]); err == nil {
+			continue
+		}
+		interfaceName := fields[len(fields)-1]
+		if interfaceName == "!" {
+			interfaceName = fields[len(fields)-2]
+		}
+		stable = append(stable,
+			fingerprint(interfaceName)+":"+fingerprint(strings.Join(fields, " ")),
+		)
+	}
+	sort.Strings(stable)
+	return stable
+}
+
+func FingerprintInterfaceNames(output string) []string {
+	fields := strings.Fields(output)
+	fingerprints := make([]string, 0, len(fields))
+	for _, field := range fields {
+		fingerprints = append(fingerprints, fingerprint(field))
+	}
+	sort.Strings(fingerprints)
+	return fingerprints
 }
 
 func FingerprintLines(output string) []string {
@@ -97,10 +168,14 @@ func FingerprintLines(output string) []string {
 	for _, line := range strings.Split(output, "\n") {
 		line = strings.Join(strings.Fields(line), " ")
 		if line != "" {
-			sum := sha256.Sum256([]byte(line))
-			lines = append(lines, hex.EncodeToString(sum[:]))
+			lines = append(lines, fingerprint(line))
 		}
 	}
 	sort.Strings(lines)
 	return lines
+}
+
+func fingerprint(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
 }

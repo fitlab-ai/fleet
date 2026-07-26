@@ -106,6 +106,44 @@ func (fakeResources) Snapshot(context.Context, []dataplane.ResourceKind) (platfo
 	return platform.ResourceSnapshot{}, nil
 }
 
+type scriptedResources struct {
+	snapshots       []platform.ResourceSnapshot
+	next            int
+	legacySnapshots []platform.ResourceSnapshot
+	legacyNext      int
+}
+
+func (s *scriptedResources) PortOwner(
+	context.Context,
+	dataplane.ListenEndpoint,
+) (dataplane.ProcessIdentity, error) {
+	return dataplane.ProcessIdentity{}, os.ErrNotExist
+}
+
+func (s *scriptedResources) Snapshot(
+	context.Context,
+	[]dataplane.ResourceKind,
+) (platform.ResourceSnapshot, error) {
+	if s.next >= len(s.snapshots) {
+		return nil, errors.New("unexpected resource snapshot")
+	}
+	snapshot := s.snapshots[s.next]
+	s.next++
+	return snapshot, nil
+}
+
+func (s *scriptedResources) SnapshotLegacy(
+	context.Context,
+	[]dataplane.ResourceKind,
+) (platform.ResourceSnapshot, error) {
+	if s.legacyNext >= len(s.legacySnapshots) {
+		return nil, errors.New("unexpected legacy resource snapshot")
+	}
+	snapshot := s.legacySnapshots[s.legacyNext]
+	s.legacyNext++
+	return snapshot, nil
+}
+
 func newTestManager(t *testing.T, configured dataplane.BackendID, planes ...dataplane.DataPlane) *Manager {
 	t.Helper()
 	registry, err := dataplane.NewRegistry("sing-box", planes...)
@@ -258,5 +296,134 @@ func TestManagerRollsBackWhenTUNResourcesAreNotEstablished(t *testing.T) {
 	}
 	if _, err := manager.Store.Load(); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("state remains after resource rollback: %v", err)
+	}
+}
+
+func TestManagerStopIgnoresExternalNetworkResourceChanges(t *testing.T) {
+	plane := &fakePlane{id: "sing-box"}
+	manager := newTestManager(t, "", plane)
+	manager.Resources = &scriptedResources{snapshots: []platform.ResourceSnapshot{
+		{
+			dataplane.ResourceTUN:   {"if-lo0", "if-en0"},
+			dataplane.ResourceRoute: {"if-en0:route-default", "if-en0:route-old-external"},
+			dataplane.ResourceDNS:   {"dns-baseline"},
+		},
+		{
+			dataplane.ResourceTUN:   {"if-lo0", "if-en0", "if-utun9"},
+			dataplane.ResourceRoute: {"if-en0:route-default", "if-en0:route-old-external", "if-bridge100:route-new-external", "if-utun9:route-fleet"},
+			dataplane.ResourceDNS:   {"dns-baseline"},
+		},
+		{
+			dataplane.ResourceTUN:   {"if-lo0", "if-en0", "if-utun10"},
+			dataplane.ResourceRoute: {"if-en0:route-default", "if-bridge100:route-new-external"},
+			dataplane.ResourceDNS:   {"dns-baseline"},
+		},
+	}}
+
+	if _, err := manager.Start(t.Context(), StartInput{
+		Node: model.Node{Name: "node", Type: "vmess"},
+		Mode: dataplane.ModeTUN, Port: 7890,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if stopped, err := manager.Stop(t.Context()); err != nil || !stopped {
+		t.Fatalf("stop = %v, %v; want successful cleanup despite external changes", stopped, err)
+	}
+}
+
+func TestManagerStopUsesLegacySnapshotForV2StateWithoutOwnedResources(t *testing.T) {
+	plane := &fakePlane{id: "sing-box"}
+	manager := newTestManager(t, "", plane)
+	legacyBaseline := platform.ResourceSnapshot{
+		dataplane.ResourceTUN:   {"legacy-interface-list"},
+		dataplane.ResourceRoute: {"legacy-route-table"},
+		dataplane.ResourceDNS:   {"legacy-dns"},
+	}
+	resources := &scriptedResources{
+		snapshots: []platform.ResourceSnapshot{{
+			dataplane.ResourceTUN:   {"if-lo0", "if-en0"},
+			dataplane.ResourceRoute: {"if-en0:route-default"},
+			dataplane.ResourceDNS:   {"legacy-dns"},
+		}},
+		legacySnapshots: []platform.ResourceSnapshot{legacyBaseline},
+	}
+	manager.Resources = resources
+	if err := manager.Store.Save(&State{
+		Schema:         SchemaV2,
+		Phase:          PhaseActive,
+		LeaseID:        "0123456789abcdef01234567",
+		Mode:           dataplane.ModeTUN,
+		Instance:       dataplane.Instance{Backend: "sing-box", Mode: dataplane.ModeTUN},
+		ResourceBefore: legacyBaseline,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if stopped, err := manager.Stop(t.Context()); err != nil || !stopped {
+		t.Fatalf(
+			"stop = %v, %v; legacy snapshots = %d, want legacy snapshot compatibility",
+			stopped, err, resources.legacyNext,
+		)
+	}
+	if resources.legacyNext != 1 {
+		t.Fatalf("legacy snapshots = %d, want 1", resources.legacyNext)
+	}
+}
+
+func TestManagerStopRejectsRemainingRouteInLegacySnapshot(t *testing.T) {
+	plane := &fakePlane{id: "sing-box"}
+	manager := newTestManager(t, "", plane)
+	manager.Resources = &scriptedResources{
+		legacySnapshots: []platform.ResourceSnapshot{{
+			dataplane.ResourceRoute: {"legacy-route-table-with-fleet-route"},
+		}},
+	}
+	if err := manager.Store.Save(&State{
+		Schema:   SchemaV2,
+		Phase:    PhaseActive,
+		LeaseID:  "0123456789abcdef01234567",
+		Mode:     dataplane.ModeTUN,
+		Instance: dataplane.Instance{Backend: "sing-box", Mode: dataplane.ModeTUN},
+		ResourceBefore: platform.ResourceSnapshot{
+			dataplane.ResourceRoute: {"legacy-route-table"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := manager.Stop(t.Context()); !dataplane.IsCode(err, dataplane.CodeStop) {
+		t.Fatalf("stop error = %v, want remaining legacy route failure", err)
+	}
+}
+
+func TestManagerStopRejectsRemainingOwnedRoute(t *testing.T) {
+	plane := &fakePlane{id: "sing-box"}
+	manager := newTestManager(t, "", plane)
+	manager.Resources = &scriptedResources{snapshots: []platform.ResourceSnapshot{
+		{
+			dataplane.ResourceTUN:   {"if-lo0", "if-en0"},
+			dataplane.ResourceRoute: {"if-en0:route-default"},
+			dataplane.ResourceDNS:   {"dns-baseline"},
+		},
+		{
+			dataplane.ResourceTUN:   {"if-lo0", "if-en0", "if-utun9"},
+			dataplane.ResourceRoute: {"if-en0:route-default", "if-utun9:route-fleet"},
+			dataplane.ResourceDNS:   {"dns-baseline"},
+		},
+		{
+			dataplane.ResourceTUN:   {"if-lo0", "if-en0"},
+			dataplane.ResourceRoute: {"if-en0:route-default", "if-utun9:route-fleet"},
+			dataplane.ResourceDNS:   {"dns-baseline"},
+		},
+	}}
+
+	if _, err := manager.Start(t.Context(), StartInput{
+		Node: model.Node{Name: "node", Type: "vmess"},
+		Mode: dataplane.ModeTUN, Port: 7890,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Stop(t.Context()); !dataplane.IsCode(err, dataplane.CodeStop) {
+		t.Fatalf("stop error = %v, want remaining owned route failure", err)
 	}
 }

@@ -179,7 +179,9 @@ func (s *SingBox) Start(ctx context.Context, request dataplane.StartRequest) (da
 	}
 	handle, err := launcher.Start(ctx, platform.LaunchRequest{
 		Command: command, Environment: environment,
-		Stdout: log, Stderr: log, NewSession: true,
+		Stdout: log, Stderr: log,
+		NewSession:      request.Mode != dataplane.ModeTUN,
+		NewProcessGroup: request.Mode == dataplane.ModeTUN,
 	})
 	if err != nil {
 		return dataplane.Instance{}, dataplane.NewError(
@@ -214,13 +216,34 @@ func (s *SingBox) Start(ctx context.Context, request dataplane.StartRequest) (da
 				errors.Join(errors.New("process inspector cannot resolve descendants"), cleanupErr),
 			)
 		}
-		resolved, resolveErr := resolver.ResolveDescendant(ctx, handle.PID(), identity)
-		if resolveErr != nil {
+		type resolveResult struct {
+			identity dataplane.ProcessIdentity
+			err      error
+		}
+		resolvedProcess := make(chan resolveResult, 1)
+		go func() {
+			resolved, resolveErr := resolver.ResolveDescendant(ctx, handle.PID(), identity)
+			resolvedProcess <- resolveResult{identity: resolved, err: resolveErr}
+		}()
+		var resolved dataplane.ProcessIdentity
+		select {
+		case launchErr := <-waitResult:
+			if launchErr == nil {
+				launchErr = errors.New("launcher exited before sing-box identity was available")
+			}
+			return dataplane.Instance{}, dataplane.NewError(
+				dataplane.CodeStart, "start", s.ID(),
+				"Could not start sing-box", launchErr,
+			)
+		case result := <-resolvedProcess:
+			resolved, err = result.identity, result.err
+		}
+		if err != nil {
 			cleanupErr := terminateLaunchedProcess(handle, waitResult)
 			return dataplane.Instance{}, dataplane.NewError(
 				dataplane.CodeStart, "start", s.ID(),
 				"Could not identify the privileged sing-box process",
-				errors.Join(resolveErr, cleanupErr),
+				errors.Join(err, cleanupErr),
 			)
 		}
 		identity = resolved

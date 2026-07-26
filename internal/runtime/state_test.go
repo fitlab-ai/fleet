@@ -49,7 +49,12 @@ func TestStateStoreRoundTripsV2Securely(t *testing.T) {
 			ID: "instance-1", Backend: "sing-box",
 			Process: dataplane.ProcessIdentity{PID: 4242},
 		},
-		Claims: []Claim{{Kind: dataplane.ResourcePort, Key: "tcp:127.0.0.1:7890", Status: ClaimActive}},
+		Claims:                  []Claim{{Kind: dataplane.ResourcePort, Key: "tcp:127.0.0.1:7890", Status: ClaimActive}},
+		ResourceSnapshotVersion: ResourceSnapshotOwnershipV1,
+		ResourceOwned: platform.ResourceSnapshot{
+			dataplane.ResourceTUN:   {"interface-fingerprint"},
+			dataplane.ResourceRoute: {"interface-fingerprint:route-fingerprint"},
+		},
 	}
 	if err := store.Save(want); err != nil {
 		t.Fatal(err)
@@ -59,7 +64,9 @@ func TestStateStoreRoundTripsV2Securely(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.Schema != SchemaV2 || got.LeaseID != want.LeaseID ||
-		got.Instance.Process.PID != 4242 || got.Claims[0].Status != ClaimActive {
+		got.Instance.Process.PID != 4242 || got.Claims[0].Status != ClaimActive ||
+		got.ResourceSnapshotVersion != ResourceSnapshotOwnershipV1 ||
+		len(got.ResourceOwned[dataplane.ResourceRoute]) != 1 {
 		t.Fatalf("round trip = %#v", got)
 	}
 	info, err := os.Stat(path)

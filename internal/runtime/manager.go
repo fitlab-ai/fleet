@@ -130,9 +130,10 @@ func (m *Manager) Start(ctx context.Context, input StartInput) (*State, error) {
 		Instance: dataplane.Instance{
 			ID: leaseID, Backend: plane.ID(), Mode: input.Mode,
 		},
-		Claims:            buildClaims(capabilities.Resources[input.Mode], leaseID, endpoint),
-		ResourceBefore:    resourceBefore,
-		SystemProxyBefore: proxyBefore,
+		Claims:                  buildClaims(capabilities.Resources[input.Mode], leaseID, endpoint),
+		ResourceBefore:          resourceBefore,
+		ResourceSnapshotVersion: ResourceSnapshotOwnershipV1,
+		SystemProxyBefore:       proxyBefore,
 	}
 	if state.Node.Name == "" {
 		state.Node.Name = input.Node.Name
@@ -470,6 +471,11 @@ func (m *Manager) verifyResourcesChanged(
 			"Runtime network resources could not be verified", err,
 		)
 	}
+	owned := platform.ResourceSnapshot{}
+	ownedTUN := snapshotDifference(
+		current[dataplane.ResourceTUN],
+		state.ResourceBefore[dataplane.ResourceTUN],
+	)
 	for _, kind := range kinds {
 		// sing-box can capture DNS through the TUN route without rewriting the
 		// host resolver. The baseline is still recorded so stop can prove that
@@ -477,13 +483,19 @@ func (m *Manager) verifyResourcesChanged(
 		if kind == dataplane.ResourceDNS {
 			continue
 		}
-		if slices.Equal(current[kind], state.ResourceBefore[kind]) {
+		added := snapshotDifference(current[kind], state.ResourceBefore[kind])
+		if kind == dataplane.ResourceRoute {
+			added = routesForInterfaces(added, ownedTUN)
+		}
+		if len(added) == 0 {
 			return dataplane.NewError(
 				dataplane.CodeProbe, "resource-probe", state.Instance.Backend,
 				"The data plane did not establish all declared network resources", nil,
 			)
 		}
+		owned[kind] = added
 	}
+	state.ResourceOwned = owned
 	return nil
 }
 
@@ -495,7 +507,20 @@ func (m *Manager) verifyResourcesRestored(ctx context.Context, state *State) err
 	if len(kinds) == 0 || m.Resources == nil {
 		return nil
 	}
-	current, err := m.Resources.Snapshot(ctx, kinds)
+	var (
+		current platform.ResourceSnapshot
+		err     error
+	)
+	if state.ResourceSnapshotVersion == ResourceSnapshotLegacy &&
+		len(state.ResourceOwned) == 0 {
+		if legacy, ok := m.Resources.(platform.LegacyResourceSnapshotter); ok {
+			current, err = legacy.SnapshotLegacy(ctx, kinds)
+		} else {
+			current, err = m.Resources.Snapshot(ctx, kinds)
+		}
+	} else {
+		current, err = m.Resources.Snapshot(ctx, kinds)
+	}
 	if err != nil {
 		return dataplane.NewError(
 			dataplane.CodeStop, "resource-restore", state.Instance.Backend,
@@ -503,6 +528,15 @@ func (m *Manager) verifyResourcesRestored(ctx context.Context, state *State) err
 		)
 	}
 	for _, kind := range kinds {
+		if owned, ok := state.ResourceOwned[kind]; ok {
+			if snapshotsIntersect(current[kind], owned) {
+				return dataplane.NewError(
+					dataplane.CodeStop, "resource-restore", state.Instance.Backend,
+					"Runtime network resources were not fully restored", nil,
+				)
+			}
+			continue
+		}
 		if !slices.Equal(current[kind], state.ResourceBefore[kind]) {
 			return dataplane.NewError(
 				dataplane.CodeStop, "resource-restore", state.Instance.Backend,
@@ -511,6 +545,48 @@ func (m *Manager) verifyResourcesRestored(ctx context.Context, state *State) err
 		}
 	}
 	return nil
+}
+
+func snapshotDifference(current, baseline []string) []string {
+	known := make(map[string]struct{}, len(baseline))
+	for _, entry := range baseline {
+		known[entry] = struct{}{}
+	}
+	var added []string
+	for _, entry := range current {
+		if _, ok := known[entry]; !ok {
+			added = append(added, entry)
+		}
+	}
+	return added
+}
+
+func routesForInterfaces(routes, interfaces []string) []string {
+	var owned []string
+	for _, route := range routes {
+		for _, interfaceFingerprint := range interfaces {
+			if len(route) > len(interfaceFingerprint) &&
+				route[:len(interfaceFingerprint)] == interfaceFingerprint &&
+				route[len(interfaceFingerprint)] == ':' {
+				owned = append(owned, route)
+				break
+			}
+		}
+	}
+	return owned
+}
+
+func snapshotsIntersect(current, owned []string) bool {
+	present := make(map[string]struct{}, len(current))
+	for _, entry := range current {
+		present[entry] = struct{}{}
+	}
+	for _, entry := range owned {
+		if _, ok := present[entry]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func newLeaseID() (string, error) {
