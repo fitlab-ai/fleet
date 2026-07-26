@@ -131,10 +131,12 @@ func BuildTUNConfig(node model.Node, port int) (map[string]any, error) {
 		"log": map[string]any{"level": "warn"},
 		"dns": map[string]any{
 			"servers": []any{
-				map[string]any{"tag": "dns-remote", "address": "https://1.1.1.1/dns-query", "detour": "proxy"},
-				map[string]any{"tag": "dns-local", "address": "local", "detour": "direct"},
+				map[string]any{
+					"type": "https", "tag": "dns-remote", "server": "1.1.1.1",
+					"path": "/dns-query", "detour": "proxy",
+				},
+				map[string]any{"type": "local", "tag": "dns-local"},
 			},
-			"rules": []any{map[string]any{"outbound": "any", "server": "dns-local"}},
 			"final": "dns-remote", "strategy": "ipv4_only", "reverse_mapping": true,
 		},
 		"inbounds": []any{
