@@ -194,10 +194,20 @@ refresh dependency.
 
 ## Development
 
+Run the complete local validation suite:
+
 ```sh
+make test
+```
+
+The target runs the same build, static analysis, standard tests, and race
+detector checks as CI:
+
+```sh
+go build -trimpath -o dist/fleet ./cmd/fleet
+go vet ./...
 go test ./...
 go test -race ./...
-go vet ./...
 ```
 
 Fleet is implemented exclusively by the Go control plane built from
