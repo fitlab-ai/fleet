@@ -98,3 +98,31 @@ func TestTUNConfigAcceptedByInstalledSingBox(t *testing.T) {
 		t.Fatalf("sing-box check failed: %v\n%s", err, output)
 	}
 }
+
+func TestTUNConfigWithRouteExclusionsAcceptedByInstalledSingBox(t *testing.T) {
+	binary, err := exec.LookPath("sing-box")
+	if err != nil {
+		t.Skip("sing-box is not installed")
+	}
+	node := model.Node{
+		Name: "t", Type: "trojan", Server: "example.com",
+		Port: 443, Password: "secret", SNI: "example.com",
+	}
+	config, err := buildTUNConfig(node, 7890, []string{
+		"203.0.113.1/32", "2001:db8::2/128",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command(binary, "check", "-c", path).CombinedOutput(); err != nil {
+		t.Fatalf("sing-box check with route exclusions failed: %v\n%s", err, output)
+	}
+}

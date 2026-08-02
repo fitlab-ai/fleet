@@ -2,10 +2,13 @@ package backend
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -103,6 +106,49 @@ func (i *adapterInspector) Signal(_ dataplane.ProcessIdentity, signal os.Signal)
 type acceptingAuthorizer struct{}
 
 func (acceptingAuthorizer) Authorize(context.Context) error { return nil }
+
+type recordingAuthorizer struct {
+	calls int
+	err   error
+}
+
+func (a *recordingAuthorizer) Authorize(context.Context) error {
+	a.calls++
+	return a.err
+}
+
+type recordingRunner struct {
+	calls [][]string
+}
+
+func (r *recordingRunner) Run(command []string, _ string, _ map[string]string, _ time.Duration) (platform.Result, error) {
+	r.calls = append(r.calls, append([]string(nil), command...))
+	return platform.Result{}, nil
+}
+
+type exitingInspector struct {
+	identity dataplane.ProcessIdentity
+	checks   int
+}
+
+func (i *exitingInspector) Inspect(int) (dataplane.ProcessIdentity, error) {
+	i.checks++
+	if i.checks > 1 {
+		return dataplane.ProcessIdentity{}, os.ErrNotExist
+	}
+	return i.identity, nil
+}
+
+func (*exitingInspector) Signal(dataplane.ProcessIdentity, os.Signal) error { return nil }
+
+type fixedResolver struct {
+	addresses []net.IPAddr
+	err       error
+}
+
+func (r fixedResolver) LookupIPAddr(context.Context, string) ([]net.IPAddr, error) {
+	return r.addresses, r.err
+}
 
 type exitedHandle struct {
 	pid int
@@ -382,6 +428,126 @@ func TestSingBoxImplementsDataPlaneRenderAndStart(t *testing.T) {
 		t.Fatal("adapter did not capture process output")
 	}
 	_, _ = io.WriteString(launcher.request.Stdout, "redacted log")
+}
+
+func TestSingBoxTUNRenderExcludesResolvedProxyServerAddresses(t *testing.T) {
+	box := &SingBox{Resolver: fixedResolver{addresses: []net.IPAddr{
+		{IP: net.ParseIP("2001:db8::2")},
+		{IP: net.ParseIP("103.181.165.120")},
+		{IP: net.ParseIP("103.181.165.120")},
+	}}}
+	artifact, err := box.Render(t.Context(), dataplane.RenderRequest{
+		Backend: box.ID(), Purpose: dataplane.ValidationStart,
+		Mode: dataplane.ModeTUN,
+		Node: model.Node{
+			Name: "node", Type: "trojan", Server: "proxy.example.com",
+			Port: 443, Password: "secret",
+		},
+		Endpoint: dataplane.ListenEndpoint{Network: "tcp", Host: "127.0.0.1", Port: 7891},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(artifact.Bytes, &config); err != nil {
+		t.Fatal(err)
+	}
+	inbound := config["inbounds"].([]any)[0].(map[string]any)
+	got := inbound["route_exclude_address"]
+	want := []any{"103.181.165.120/32", "2001:db8::2/128"}
+	if !slices.Equal(got.([]any), want) {
+		t.Fatalf("route exclusions = %#v, want %#v", got, want)
+	}
+}
+
+func TestSingBoxTUNRenderRejectsUnresolvedProxyServer(t *testing.T) {
+	box := &SingBox{Resolver: fixedResolver{err: errors.New("lookup failed")}}
+	_, err := box.Render(t.Context(), dataplane.RenderRequest{
+		Backend: box.ID(), Purpose: dataplane.ValidationStart,
+		Mode: dataplane.ModeTUN,
+		Node: model.Node{
+			Name: "node", Type: "trojan", Server: "proxy.example.com",
+			Port: 443, Password: "secret",
+		},
+		Endpoint: dataplane.ListenEndpoint{Network: "tcp", Host: "127.0.0.1", Port: 7891},
+	})
+	var planeErr *dataplane.Error
+	if !errors.As(err, &planeErr) || planeErr.Code != dataplane.CodeResourceConflict {
+		t.Fatalf("error = %#v, want resource-conflict", err)
+	}
+}
+
+func TestSingBoxTUNExportRendersOfflineWithoutRouteExclusions(t *testing.T) {
+	box := &SingBox{Resolver: fixedResolver{err: errors.New("lookup failed")}}
+	node := model.Node{
+		Name: "node", Type: "trojan", Server: "proxy.example.com",
+		Port: 443, Password: "secret",
+	}
+	artifact, err := box.Render(t.Context(), dataplane.RenderRequest{
+		Backend: box.ID(), Purpose: dataplane.ValidationExport,
+		Mode: dataplane.ModeTUN, Node: node,
+		Endpoint: dataplane.ListenEndpoint{Network: "tcp", Host: "127.0.0.1", Port: 7891},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := BuildTUNConfig(node, 7891)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantJSON, err := json.MarshalIndent(want, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantJSON = append(wantJSON, '\n')
+	if string(artifact.Bytes) != string(wantJSON) {
+		t.Fatalf("offline export:\n got %s\nwant %s", artifact.Bytes, wantJSON)
+	}
+}
+
+func TestSingBoxTUNStopReauthorizesBeforePrivilegedSignal(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("privileged stop authorization is only used by non-root Fleet")
+	}
+	identity := dataplane.ProcessIdentity{PID: 5252, Executable: "/opt/homebrew/bin/sing-box"}
+	inspector := &exitingInspector{identity: identity}
+	authorizer := &recordingAuthorizer{}
+	runner := &recordingRunner{}
+	box := &SingBox{Inspector: inspector, Authorizer: authorizer, Runner: runner}
+	if err := box.Stop(t.Context(), dataplane.Instance{
+		Mode: dataplane.ModeTUN, Process: identity,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if authorizer.calls != 1 {
+		t.Fatalf("authorization calls = %d, want 1", authorizer.calls)
+	}
+	if len(runner.calls) != 1 || strings.Join(runner.calls[0], " ") != "sudo -n kill -TERM 5252" {
+		t.Fatalf("commands = %#v", runner.calls)
+	}
+}
+
+func TestSingBoxTUNStopDeniedAuthorizationDoesNotSignal(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("privileged stop authorization is only used by non-root Fleet")
+	}
+	identity := dataplane.ProcessIdentity{PID: 5252, Executable: "/opt/homebrew/bin/sing-box"}
+	authorizer := &recordingAuthorizer{err: errors.New("denied")}
+	runner := &recordingRunner{}
+	box := &SingBox{
+		Inspector:  &adapterInspector{identity: identity},
+		Authorizer: authorizer, Runner: runner,
+	}
+	err := box.Stop(t.Context(), dataplane.Instance{
+		Mode: dataplane.ModeTUN, Process: identity,
+	})
+	var planeErr *dataplane.Error
+	if !errors.As(err, &planeErr) || planeErr.Code != dataplane.CodePermission {
+		t.Fatalf("error = %#v, want permission", err)
+	}
+	if authorizer.calls != 1 || len(runner.calls) != 0 {
+		t.Fatalf("authorization calls = %d, commands = %#v", authorizer.calls, runner.calls)
+	}
 }
 
 func TestSingBoxCapabilitiesDeclareOwnedResources(t *testing.T) {

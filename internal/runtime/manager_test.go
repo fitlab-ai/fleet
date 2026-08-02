@@ -22,6 +22,7 @@ type fakePlane struct {
 	validations  int
 	starts       int
 	stops        int
+	stopErr      error
 	stopCtxError error
 }
 
@@ -67,7 +68,7 @@ func (f *fakePlane) Start(context.Context, dataplane.StartRequest) (dataplane.In
 func (f *fakePlane) Stop(ctx context.Context, _ dataplane.Instance) error {
 	f.stops++
 	f.stopCtxError = ctx.Err()
-	return nil
+	return f.stopErr
 }
 func (f *fakePlane) Probe(context.Context, dataplane.ProbeRequest) (dataplane.HealthResult, error) {
 	return dataplane.HealthResult{Status: dataplane.HealthHealthy}, f.probeErr
@@ -259,6 +260,40 @@ func TestManagerRefusesUnverifiedLegacyStop(t *testing.T) {
 	}
 	if plane.stops != 0 {
 		t.Fatal("unverified legacy process was stopped")
+	}
+}
+
+func TestManagerPreservesDegradedStateWhenTUNStopAuthorizationIsDenied(t *testing.T) {
+	permissionErr := dataplane.NewError(
+		dataplane.CodePermission, "stop", "sing-box",
+		"Could not obtain administrator authorization", errors.New("denied"),
+	)
+	plane := &fakePlane{id: "sing-box", stopErr: permissionErr}
+	manager := newTestManager(t, "", plane)
+	state := &State{
+		Schema: SchemaV2, Phase: PhaseActive,
+		LeaseID: "0123456789abcdef01234567", Mode: dataplane.ModeTUN,
+		Instance: dataplane.Instance{
+			Backend: "sing-box", Mode: dataplane.ModeTUN,
+			Process: dataplane.ProcessIdentity{PID: 5252, Executable: "/bin/sing-box"},
+		},
+		Claims: []Claim{{
+			Kind: dataplane.ResourceProcess, Owner: "0123456789abcdef01234567",
+			Status: ClaimActive,
+		}},
+	}
+	if err := manager.Store.Save(state); err != nil {
+		t.Fatal(err)
+	}
+	if stopped, err := manager.Stop(t.Context()); stopped || !dataplane.IsCode(err, dataplane.CodePermission) {
+		t.Fatalf("stop = %v, %v; want preserved permission failure", stopped, err)
+	}
+	got, err := manager.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Phase != PhaseDegraded || got.LastError != permissionErr.Error() || len(got.Claims) != 1 {
+		t.Fatalf("state = %#v, want degraded state with active claim", got)
 	}
 }
 

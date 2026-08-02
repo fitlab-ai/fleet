@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"syscall"
 	"time"
@@ -28,6 +29,11 @@ type SingBox struct {
 	Launcher   platform.Launcher
 	Inspector  platform.ProcessInspector
 	Authorizer platform.Authorizer
+	Resolver   IPResolver
+}
+
+type IPResolver interface {
+	LookupIPAddr(context.Context, string) ([]net.IPAddr, error)
 }
 
 func (s *SingBox) ID() dataplane.BackendID { return "sing-box" }
@@ -84,7 +90,7 @@ func (s *SingBox) Validate(ctx context.Context, request dataplane.ValidateReques
 	return ctx.Err()
 }
 
-func (s *SingBox) Render(_ context.Context, request dataplane.RenderRequest) (dataplane.ConfigArtifact, error) {
+func (s *SingBox) Render(ctx context.Context, request dataplane.RenderRequest) (dataplane.ConfigArtifact, error) {
 	var (
 		config map[string]any
 		err    error
@@ -93,7 +99,19 @@ func (s *SingBox) Render(_ context.Context, request dataplane.RenderRequest) (da
 	case dataplane.ModeProxy:
 		config, err = BuildProxyConfig(request.Node, request.Endpoint.Port)
 	case dataplane.ModeTUN:
-		config, err = BuildTUNConfig(request.Node, request.Endpoint.Port)
+		var exclusions []string
+		exclusions, err = s.resolveRouteExclusions(ctx, request.Node.Server)
+		if err != nil {
+			if request.Purpose == dataplane.ValidationExport {
+				config, err = BuildTUNConfig(request.Node, request.Endpoint.Port)
+				break
+			}
+			return dataplane.ConfigArtifact{}, dataplane.NewError(
+				dataplane.CodeResourceConflict, "render", s.ID(),
+				"Could not resolve the proxy server before configuring TUN routes", err,
+			)
+		}
+		config, err = buildTUNConfig(request.Node, request.Endpoint.Port, exclusions)
 	default:
 		err = fmt.Errorf("invalid mode: %s", request.Mode)
 	}
@@ -116,6 +134,42 @@ func (s *SingBox) Render(_ context.Context, request dataplane.RenderRequest) (da
 		Backend: s.ID(), Format: "json", Filename: "sing-box.json",
 		Bytes: data, SHA256: hex.EncodeToString(sum[:]),
 	}, nil
+}
+
+func (s *SingBox) resolveRouteExclusions(ctx context.Context, server string) ([]string, error) {
+	var addresses []net.IPAddr
+	if ip := net.ParseIP(server); ip != nil {
+		addresses = []net.IPAddr{{IP: ip}}
+	} else {
+		resolver := s.Resolver
+		if resolver == nil {
+			resolver = net.DefaultResolver
+		}
+		var err error
+		addresses, err = resolver.LookupIPAddr(ctx, server)
+		if err != nil {
+			return nil, err
+		}
+	}
+	unique := make(map[string]struct{}, len(addresses))
+	for _, address := range addresses {
+		if ipv4 := address.IP.To4(); ipv4 != nil {
+			unique[ipv4.String()+"/32"] = struct{}{}
+			continue
+		}
+		if ipv6 := address.IP.To16(); ipv6 != nil {
+			unique[ipv6.String()+"/128"] = struct{}{}
+		}
+	}
+	if len(unique) == 0 {
+		return nil, fmt.Errorf("proxy server resolved without usable IP addresses")
+	}
+	exclusions := make([]string, 0, len(unique))
+	for address := range unique {
+		exclusions = append(exclusions, address)
+	}
+	sort.Strings(exclusions)
+	return exclusions, nil
 }
 
 func (s *SingBox) Start(ctx context.Context, request dataplane.StartRequest) (dataplane.Instance, error) {
@@ -308,6 +362,18 @@ func (s *SingBox) Stop(ctx context.Context, instance dataplane.Instance) error {
 			dataplane.CodeOwnershipUnknown, "stop", s.ID(),
 			"sing-box process ownership could not be verified", nil,
 		)
+	}
+	if instance.Mode == dataplane.ModeTUN && os.Geteuid() != 0 {
+		authorizer := s.Authorizer
+		if authorizer == nil {
+			authorizer = platform.SudoAuthorizer{}
+		}
+		if err := authorizer.Authorize(ctx); err != nil {
+			return dataplane.NewError(
+				dataplane.CodePermission, "stop", s.ID(),
+				"Could not obtain administrator authorization", err,
+			)
+		}
 	}
 	if err := s.signal(instance, inspector, syscall.SIGTERM); err != nil {
 		return dataplane.NewError(

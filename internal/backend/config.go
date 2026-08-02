@@ -123,9 +123,20 @@ func BuildProxyConfig(node model.Node, port int) (map[string]any, error) {
 }
 
 func BuildTUNConfig(node model.Node, port int) (map[string]any, error) {
+	return buildTUNConfig(node, port, nil)
+}
+
+func buildTUNConfig(node model.Node, port int, routeExclusions []string) (map[string]any, error) {
 	proxy, err := outbound(node)
 	if err != nil {
 		return nil, err
+	}
+	tunInbound := map[string]any{
+		"type": "tun", "tag": "tun-in", "address": []any{TUNAddress},
+		"mtu": 9000, "auto_route": true, "strict_route": true, "stack": "system",
+	}
+	if len(routeExclusions) > 0 {
+		tunInbound["route_exclude_address"] = routeExclusions
 	}
 	return map[string]any{
 		"log": map[string]any{"level": "warn"},
@@ -140,7 +151,7 @@ func BuildTUNConfig(node model.Node, port int) (map[string]any, error) {
 			"final": "dns-remote", "strategy": "ipv4_only", "reverse_mapping": true,
 		},
 		"inbounds": []any{
-			map[string]any{"type": "tun", "tag": "tun-in", "address": []any{TUNAddress}, "mtu": 9000, "auto_route": true, "strict_route": true, "stack": "system"},
+			tunInbound,
 			map[string]any{"type": "mixed", "tag": "mixed-in", "listen": Host, "listen_port": port},
 		},
 		"outbounds": []any{proxy, map[string]any{"type": "direct", "tag": "direct"}},
