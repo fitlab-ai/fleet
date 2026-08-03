@@ -1,6 +1,7 @@
 package platform
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -81,6 +82,26 @@ func TestFingerprintRouteLinesAssociatesRoutesWithInterfaces(t *testing.T) {
 
 func TestParseFullTunnelObservations(t *testing.T) {
 	const routeHeader = "Destination Gateway Flags Netif Expire\n"
+	flClashRoutes := routeHeader + strings.Join([]string{
+		"1 198.18.0.1 UGSc utun0",
+		"2/7 198.18.0.1 UGSc utun0",
+		"4/6 198.18.0.1 UGSc utun0",
+		"8/5 198.18.0.1 UGSc utun0",
+		"16/4 198.18.0.1 UGSc utun0",
+		"32/3 198.18.0.1 UGSc utun0",
+		"64/2 198.18.0.1 UGSc utun0",
+		"128.0/1 198.18.0.1 UGSc utun0",
+	}, "\n") + "\n"
+	publicOctetRoutes := func(excluded map[int]bool) string {
+		var output strings.Builder
+		output.WriteString(routeHeader)
+		for octet := 1; octet <= 223; octet++ {
+			if !excluded[octet] {
+				fmt.Fprintf(&output, "%d/8 198.18.0.1 UGSc utun6\n", octet)
+			}
+		}
+		return output.String()
+	}
 	tests := []struct {
 		name    string
 		ipv4    string
@@ -109,6 +130,38 @@ func TestParseFullTunnelObservations(t *testing.T) {
 		{
 			name: "one split half is not a proven full tunnel",
 			ipv4: routeHeader + "128.0/1 198.18.0.1 UGSc utun0\n",
+		},
+		{
+			name: "FlClash hierarchical IPv4 routes cover the public internet",
+			ipv4: flClashRoutes,
+			want: []FullTunnelObservation{{Interface: "utun0", Family: "ipv4", Shape: "coverage"}},
+		},
+		{
+			name: "ninety five percent public IPv4 coverage meets the fallback threshold",
+			ipv4: publicOctetRoutes(map[int]bool{
+				1: true, 2: true, 3: true, 4: true, 5: true, 6: true,
+				7: true, 8: true, 9: true, 11: true, 12: true,
+			}),
+			want: []FullTunnelObservation{{Interface: "utun6", Family: "ipv4", Shape: "coverage"}},
+		},
+		{
+			name: "less than ninety five percent public IPv4 coverage stays allowed",
+			ipv4: publicOctetRoutes(map[int]bool{
+				1: true, 2: true, 3: true, 4: true, 5: true, 6: true,
+				7: true, 8: true, 9: true, 11: true, 12: true, 13: true,
+			}),
+		},
+		{
+			name: "public coverage is not combined across tunnel interfaces",
+			ipv4: strings.Replace(flClashRoutes, "128.0/1 198.18.0.1 UGSc utun0", "128.0/1 198.18.0.1 UGSc utun1", 1),
+		},
+		{
+			name: "interface scoped hierarchical routes are ignored",
+			ipv4: strings.ReplaceAll(flClashRoutes, "UGSc utun0", "UGScI utun0"),
+		},
+		{
+			name: "private and malformed routes do not reach the fallback threshold",
+			ipv4: routeHeader + "10/8 198.18.0.1 UGSc utun4\n172.16/12 198.18.0.1 UGSc utun4\n192.168/16 198.18.0.1 UGSc utun4\n300/7 198.18.0.1 UGSc utun4\n",
 		},
 		{
 			name: "macOS interface-scoped defaults are not full tunnels",
