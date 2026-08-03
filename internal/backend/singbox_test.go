@@ -430,7 +430,7 @@ func TestSingBoxImplementsDataPlaneRenderAndStart(t *testing.T) {
 	_, _ = io.WriteString(launcher.request.Stdout, "redacted log")
 }
 
-func TestSingBoxTUNRenderExcludesResolvedProxyServerAddresses(t *testing.T) {
+func TestSingBoxTUNRenderPinsAndExcludesOneResolvedProxyServerAddress(t *testing.T) {
 	box := &SingBox{Resolver: fixedResolver{addresses: []net.IPAddr{
 		{IP: net.ParseIP("2001:db8::2")},
 		{IP: net.ParseIP("103.181.165.120")},
@@ -454,9 +454,94 @@ func TestSingBoxTUNRenderExcludesResolvedProxyServerAddresses(t *testing.T) {
 	}
 	inbound := config["inbounds"].([]any)[0].(map[string]any)
 	got := inbound["route_exclude_address"]
-	want := []any{"103.181.165.120/32", "2001:db8::2/128"}
+	want := []any{"103.181.165.120/32"}
 	if !slices.Equal(got.([]any), want) {
 		t.Fatalf("route exclusions = %#v, want %#v", got, want)
+	}
+	outbound := config["outbounds"].([]any)[0].(map[string]any)
+	if outbound["server"] != "103.181.165.120" {
+		t.Fatalf("outbound server = %#v, want pinned IPv4 address", outbound["server"])
+	}
+	tls := outbound["tls"].(map[string]any)
+	if tls["server_name"] != "proxy.example.com" {
+		t.Fatalf("TLS server name = %#v, want logical hostname", tls["server_name"])
+	}
+}
+
+func TestSingBoxTUNRenderPreservesImplicitWebSocketHostWhenDialingIP(t *testing.T) {
+	box := &SingBox{Resolver: fixedResolver{addresses: []net.IPAddr{{IP: net.ParseIP("203.0.113.7")}}}}
+	artifact, err := box.Render(t.Context(), dataplane.RenderRequest{
+		Backend: box.ID(), Purpose: dataplane.ValidationStart,
+		Mode: dataplane.ModeTUN,
+		Node: model.Node{
+			Name: "node", Type: "vmess", Server: "ws.example.com",
+			Port: 443, UUID: "uuid", Network: "ws",
+		},
+		Endpoint: dataplane.ListenEndpoint{Network: "tcp", Host: "127.0.0.1", Port: 7891},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(artifact.Bytes, &config); err != nil {
+		t.Fatal(err)
+	}
+	outbound := config["outbounds"].([]any)[0].(map[string]any)
+	if outbound["server"] != "203.0.113.7" {
+		t.Fatalf("outbound server = %#v, want pinned address", outbound["server"])
+	}
+	transport := outbound["transport"].(map[string]any)
+	headers := transport["headers"].(map[string]any)
+	if headers["Host"] != "ws.example.com" {
+		t.Fatalf("websocket Host = %#v, want logical hostname", headers["Host"])
+	}
+}
+
+func TestSingBoxTUNRenderPreservesExplicitWebSocketHostWhenDialingIP(t *testing.T) {
+	box := &SingBox{Resolver: fixedResolver{addresses: []net.IPAddr{{IP: net.ParseIP("203.0.113.7")}}}}
+	artifact, err := box.Render(t.Context(), dataplane.RenderRequest{
+		Backend: box.ID(), Purpose: dataplane.ValidationStart,
+		Mode: dataplane.ModeTUN,
+		Node: model.Node{
+			Name: "node", Type: "vmess", Server: "ws.example.com",
+			Port: 443, UUID: "uuid", Network: "ws",
+			WSOpts: map[string]any{"headers": map[string]any{"host": "edge.example.com"}},
+		},
+		Endpoint: dataplane.ListenEndpoint{Network: "tcp", Host: "127.0.0.1", Port: 7891},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(artifact.Bytes, &config); err != nil {
+		t.Fatal(err)
+	}
+	outbound := config["outbounds"].([]any)[0].(map[string]any)
+	transport := outbound["transport"].(map[string]any)
+	headers := transport["headers"].(map[string]any)
+	if headers["host"] != "edge.example.com" || headers["Host"] != nil {
+		t.Fatalf("websocket headers = %#v, want explicit host unchanged", headers)
+	}
+}
+
+func TestSingBoxResolveDialAddressUsesIPv6WhenIPv4IsUnavailable(t *testing.T) {
+	box := &SingBox{Resolver: fixedResolver{addresses: []net.IPAddr{
+		{IP: net.ParseIP("2001:db8::b")},
+		{IP: net.ParseIP("2001:db8::a")},
+	}}}
+	dialServer, exclusion, err := box.resolveDialAddress(t.Context(), "proxy.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dialServer != "2001:db8::a" || exclusion != "2001:db8::a/128" {
+		t.Fatalf("dial target = %q, %q; want deterministic IPv6 target", dialServer, exclusion)
+	}
+}
+
+func TestSingBoxResolveDialAddressRejectsNoUsableAddresses(t *testing.T) {
+	box := &SingBox{Resolver: fixedResolver{addresses: []net.IPAddr{{IP: net.IP{}}}}}
+	if _, _, err := box.resolveDialAddress(t.Context(), "proxy.example.com"); err == nil {
+		t.Fatal("resolve succeeded without a usable address")
 	}
 }
 

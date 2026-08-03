@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -35,6 +36,7 @@ type Manager struct {
 	Configured      dataplane.BackendID
 	Proxy           platform.ProxyManager
 	Resources       platform.ResourceInspector
+	PortBinder      platform.PortBinder
 	CleanupTimeout  time.Duration
 	ReconcileLegacy func(*State) error
 }
@@ -79,6 +81,11 @@ func (m *Manager) Start(ctx context.Context, input StartInput) (*State, error) {
 	}
 	if err := plane.Validate(ctx, request); err != nil {
 		return nil, err
+	}
+	if input.Mode == dataplane.ModeTUN {
+		if err := m.checkFullTunnelConflicts(ctx, nil, false); err != nil {
+			return nil, err
+		}
 	}
 	if err := m.checkPort(ctx, endpoint); err != nil {
 		return nil, err
@@ -173,6 +180,13 @@ func (m *Manager) Start(ctx context.Context, input StartInput) (*State, error) {
 	}
 	if err := m.verifyResourcesChanged(ctx, state, resourceKinds); err != nil {
 		return nil, m.failStart(ctx, state, plane, instance, err)
+	}
+	if input.Mode == dataplane.ModeTUN {
+		if err := m.checkFullTunnelConflicts(
+			ctx, state.ResourceOwned[dataplane.ResourceTUN], true,
+		); err != nil {
+			return nil, m.failStart(ctx, state, plane, instance, err)
+		}
 	}
 	if input.Mode == dataplane.ModeProxy {
 		if err := m.proxy().Enable(ctx, endpoint.Host, endpoint.Port); err != nil {
@@ -365,23 +379,97 @@ func (m *Manager) proxy() platform.ProxyManager {
 }
 
 func (m *Manager) checkPort(ctx context.Context, endpoint dataplane.ListenEndpoint) error {
-	if m.Resources == nil {
-		return nil
+	binder := m.PortBinder
+	if binder == nil {
+		binder = platform.NetPortBinder{}
 	}
-	owner, err := m.Resources.PortOwner(ctx, endpoint)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
+	address := net.JoinHostPort(endpoint.Host, strconv.Itoa(endpoint.Port))
+	tcp, err := binder.Listen(ctx, "tcp", address)
 	if err != nil {
-		return dataplane.NewError(
-			dataplane.CodeResourceConflict, "port-preflight", m.Configured,
-			"The local proxy port could not be inspected", err,
-		)
+		return m.portConflict(ctx, endpoint, "tcp", err)
+	}
+	udp, err := binder.ListenPacket(ctx, "udp", address)
+	if err != nil {
+		closeErr := tcp.Close()
+		return m.portConflict(ctx, endpoint, "udp", errors.Join(err, closeErr))
+	}
+	closeErr := errors.Join(udp.Close(), tcp.Close())
+	if closeErr != nil {
+		return m.portConflict(ctx, endpoint, "tcp/udp", closeErr)
+	}
+	return nil
+}
+
+func (m *Manager) portConflict(
+	ctx context.Context,
+	endpoint dataplane.ListenEndpoint,
+	network string,
+	cause error,
+) error {
+	message := "The local proxy " + network + " port is unavailable"
+	if m.Resources != nil {
+		ownerEndpoint := endpoint
+		ownerEndpoint.Network = network
+		owner, err := m.Resources.PortOwner(ctx, ownerEndpoint)
+		if err == nil && owner.PID > 0 {
+			message += " because it is used by process " + strconv.Itoa(owner.PID)
+		}
 	}
 	return dataplane.NewError(
 		dataplane.CodeResourceConflict, "port-preflight", m.Configured,
-		"The local proxy port is already in use by process "+strconv.Itoa(owner.PID), nil,
+		message, cause,
 	)
+}
+
+func (m *Manager) checkFullTunnelConflicts(
+	ctx context.Context,
+	allowedInterfaces []string,
+	requireOwned bool,
+) error {
+	if m.Resources == nil {
+		return dataplane.NewError(
+			dataplane.CodeResourceConflict, "full-tunnel-preflight", m.Configured,
+			"Full-tunnel routes could not be inspected", nil,
+		)
+	}
+	observations, err := m.Resources.FullTunnels(ctx)
+	if err != nil {
+		code := dataplane.CodeResourceConflict
+		operation := "full-tunnel-preflight"
+		message := "Full-tunnel routes could not be inspected"
+		if requireOwned {
+			code = dataplane.CodeProbe
+			operation = "full-tunnel-probe"
+			message = "Full-tunnel routes could not be verified before activation"
+		}
+		return dataplane.NewError(code, operation, m.Configured, message, err)
+	}
+	if !requireOwned {
+		if len(observations) == 0 {
+			return nil
+		}
+		return dataplane.NewError(
+			dataplane.CodeResourceConflict, "full-tunnel-preflight", m.Configured,
+			"Another full-tunnel interface is already active", nil,
+		)
+	}
+	if len(allowedInterfaces) != 1 || len(observations) == 0 {
+		return dataplane.NewError(
+			dataplane.CodeProbe, "full-tunnel-probe", m.Configured,
+			"The data plane did not establish one owned full-tunnel interface", nil,
+		)
+	}
+	allowed := allowedInterfaces[0]
+	for _, observation := range observations {
+		fingerprints := platform.FingerprintInterfaceNames(observation.Interface)
+		if len(fingerprints) != 1 || fingerprints[0] != allowed {
+			return dataplane.NewError(
+				dataplane.CodeProbe, "full-tunnel-probe", m.Configured,
+				"Another full-tunnel interface appeared during startup", nil,
+			)
+		}
+	}
+	return nil
 }
 
 func (m *Manager) failStart(
@@ -477,6 +565,12 @@ func (m *Manager) verifyResourcesChanged(
 		state.ResourceBefore[dataplane.ResourceTUN],
 	)
 	for _, kind := range kinds {
+		if !snapshotContainsAll(current[kind], state.ResourceBefore[kind]) {
+			return dataplane.NewError(
+				dataplane.CodeProbe, "resource-probe", state.Instance.Backend,
+				"Runtime network resources replaced a pre-existing resource", nil,
+			)
+		}
 		// sing-box can capture DNS through the TUN route without rewriting the
 		// host resolver. The baseline is still recorded so stop can prove that
 		// Fleet did not leave a resolver mutation behind.
@@ -511,8 +605,9 @@ func (m *Manager) verifyResourcesRestored(ctx context.Context, state *State) err
 		current platform.ResourceSnapshot
 		err     error
 	)
-	if state.ResourceSnapshotVersion == ResourceSnapshotLegacy &&
-		len(state.ResourceOwned) == 0 {
+	legacySnapshot := state.ResourceSnapshotVersion == ResourceSnapshotLegacy &&
+		len(state.ResourceOwned) == 0
+	if legacySnapshot {
 		if legacy, ok := m.Resources.(platform.LegacyResourceSnapshotter); ok {
 			current, err = legacy.SnapshotLegacy(ctx, kinds)
 		} else {
@@ -528,8 +623,8 @@ func (m *Manager) verifyResourcesRestored(ctx context.Context, state *State) err
 		)
 	}
 	for _, kind := range kinds {
-		if owned, ok := state.ResourceOwned[kind]; ok {
-			if snapshotsIntersect(current[kind], owned) {
+		if legacySnapshot {
+			if !slices.Equal(current[kind], state.ResourceBefore[kind]) {
 				return dataplane.NewError(
 					dataplane.CodeStop, "resource-restore", state.Instance.Backend,
 					"Runtime network resources were not fully restored", nil,
@@ -537,7 +632,15 @@ func (m *Manager) verifyResourcesRestored(ctx context.Context, state *State) err
 			}
 			continue
 		}
-		if !slices.Equal(current[kind], state.ResourceBefore[kind]) {
+		if owned, ok := state.ResourceOwned[kind]; ok {
+			if snapshotsIntersect(current[kind], owned) {
+				return dataplane.NewError(
+					dataplane.CodeStop, "resource-restore", state.Instance.Backend,
+					"Runtime network resources were not fully restored", nil,
+				)
+			}
+		}
+		if !snapshotContainsAll(current[kind], state.ResourceBefore[kind]) {
 			return dataplane.NewError(
 				dataplane.CodeStop, "resource-restore", state.Instance.Backend,
 				"Runtime network resources were not fully restored", nil,
@@ -545,6 +648,19 @@ func (m *Manager) verifyResourcesRestored(ctx context.Context, state *State) err
 		}
 	}
 	return nil
+}
+
+func snapshotContainsAll(current, baseline []string) bool {
+	present := make(map[string]struct{}, len(current))
+	for _, entry := range current {
+		present[entry] = struct{}{}
+	}
+	for _, entry := range baseline {
+		if _, ok := present[entry]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func snapshotDifference(current, baseline []string) []string {

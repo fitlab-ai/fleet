@@ -108,9 +108,9 @@ func TestTUNConfigWithRouteExclusionsAcceptedByInstalledSingBox(t *testing.T) {
 		Name: "t", Type: "trojan", Server: "example.com",
 		Port: 443, Password: "secret", SNI: "example.com",
 	}
-	config, err := buildTUNConfig(node, 7890, []string{
-		"203.0.113.1/32", "2001:db8::2/128",
-	})
+	config, err := buildTUNConfigForDial(
+		node, 7890, "203.0.113.1", []string{"203.0.113.1/32"},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

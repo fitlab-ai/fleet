@@ -99,8 +99,8 @@ func (s *SingBox) Render(ctx context.Context, request dataplane.RenderRequest) (
 	case dataplane.ModeProxy:
 		config, err = BuildProxyConfig(request.Node, request.Endpoint.Port)
 	case dataplane.ModeTUN:
-		var exclusions []string
-		exclusions, err = s.resolveRouteExclusions(ctx, request.Node.Server)
+		var dialServer, exclusion string
+		dialServer, exclusion, err = s.resolveDialAddress(ctx, request.Node.Server)
 		if err != nil {
 			if request.Purpose == dataplane.ValidationExport {
 				config, err = BuildTUNConfig(request.Node, request.Endpoint.Port)
@@ -111,7 +111,9 @@ func (s *SingBox) Render(ctx context.Context, request dataplane.RenderRequest) (
 				"Could not resolve the proxy server before configuring TUN routes", err,
 			)
 		}
-		config, err = buildTUNConfig(request.Node, request.Endpoint.Port, exclusions)
+		config, err = buildTUNConfigForDial(
+			request.Node, request.Endpoint.Port, dialServer, []string{exclusion},
+		)
 	default:
 		err = fmt.Errorf("invalid mode: %s", request.Mode)
 	}
@@ -136,7 +138,7 @@ func (s *SingBox) Render(ctx context.Context, request dataplane.RenderRequest) (
 	}, nil
 }
 
-func (s *SingBox) resolveRouteExclusions(ctx context.Context, server string) ([]string, error) {
+func (s *SingBox) resolveDialAddress(ctx context.Context, server string) (string, string, error) {
 	var addresses []net.IPAddr
 	if ip := net.ParseIP(server); ip != nil {
 		addresses = []net.IPAddr{{IP: ip}}
@@ -148,28 +150,35 @@ func (s *SingBox) resolveRouteExclusions(ctx context.Context, server string) ([]
 		var err error
 		addresses, err = resolver.LookupIPAddr(ctx, server)
 		if err != nil {
-			return nil, err
+			return "", "", err
 		}
 	}
-	unique := make(map[string]struct{}, len(addresses))
+	uniqueIPv4 := make(map[string]struct{}, len(addresses))
+	uniqueIPv6 := make(map[string]struct{}, len(addresses))
 	for _, address := range addresses {
 		if ipv4 := address.IP.To4(); ipv4 != nil {
-			unique[ipv4.String()+"/32"] = struct{}{}
+			uniqueIPv4[ipv4.String()] = struct{}{}
 			continue
 		}
 		if ipv6 := address.IP.To16(); ipv6 != nil {
-			unique[ipv6.String()+"/128"] = struct{}{}
+			uniqueIPv6[ipv6.String()] = struct{}{}
 		}
 	}
-	if len(unique) == 0 {
-		return nil, fmt.Errorf("proxy server resolved without usable IP addresses")
+	if len(uniqueIPv4) == 0 && len(uniqueIPv6) == 0 {
+		return "", "", fmt.Errorf("proxy server resolved without usable IP addresses")
 	}
-	exclusions := make([]string, 0, len(unique))
-	for address := range unique {
-		exclusions = append(exclusions, address)
+	addressesForFamily := uniqueIPv4
+	prefix := "/32"
+	if len(addressesForFamily) == 0 {
+		addressesForFamily = uniqueIPv6
+		prefix = "/128"
 	}
-	sort.Strings(exclusions)
-	return exclusions, nil
+	ordered := make([]string, 0, len(addressesForFamily))
+	for address := range addressesForFamily {
+		ordered = append(ordered, address)
+	}
+	sort.Strings(ordered)
+	return ordered[0], ordered[0] + prefix, nil
 }
 
 func (s *SingBox) Start(ctx context.Context, request dataplane.StartRequest) (dataplane.Instance, error) {

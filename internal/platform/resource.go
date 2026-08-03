@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"os/exec"
 	"sort"
@@ -18,9 +20,33 @@ import (
 
 type ResourceSnapshot map[dataplane.ResourceKind][]string
 
+type FullTunnelObservation struct {
+	Interface string
+	Family    string
+	Shape     string
+}
+
 type ResourceInspector interface {
 	PortOwner(context.Context, dataplane.ListenEndpoint) (dataplane.ProcessIdentity, error)
 	Snapshot(context.Context, []dataplane.ResourceKind) (ResourceSnapshot, error)
+	FullTunnels(context.Context) ([]FullTunnelObservation, error)
+}
+
+type PortBinder interface {
+	Listen(context.Context, string, string) (io.Closer, error)
+	ListenPacket(context.Context, string, string) (io.Closer, error)
+}
+
+type NetPortBinder struct {
+	ListenConfig net.ListenConfig
+}
+
+func (b NetPortBinder) Listen(ctx context.Context, network, address string) (io.Closer, error) {
+	return b.ListenConfig.Listen(ctx, network, address)
+}
+
+func (b NetPortBinder) ListenPacket(ctx context.Context, network, address string) (io.Closer, error) {
+	return b.ListenConfig.ListenPacket(ctx, network, address)
 }
 
 // LegacyResourceSnapshotter reproduces the opaque snapshot format persisted by
@@ -32,9 +58,8 @@ type LegacyResourceSnapshotter interface {
 type ExecResourceInspector struct{}
 
 func (ExecResourceInspector) PortOwner(ctx context.Context, endpoint dataplane.ListenEndpoint) (dataplane.ProcessIdentity, error) {
-	output, err := exec.CommandContext(
-		ctx, "lsof", "-nP", fmt.Sprintf("-iTCP:%d", endpoint.Port), "-sTCP:LISTEN", "-Fpca",
-	).Output()
+	command := portOwnerCommand(endpoint)
+	output, err := exec.CommandContext(ctx, command[0], command[1:]...).Output()
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
@@ -43,6 +68,15 @@ func (ExecResourceInspector) PortOwner(ctx context.Context, endpoint dataplane.L
 		return dataplane.ProcessIdentity{}, err
 	}
 	return ParseLsofOwner(string(output))
+}
+
+func portOwnerCommand(endpoint dataplane.ListenEndpoint) []string {
+	if strings.EqualFold(endpoint.Network, "udp") {
+		return []string{"lsof", "-nP", fmt.Sprintf("-iUDP:%d", endpoint.Port), "-Fpca"}
+	}
+	return []string{
+		"lsof", "-nP", fmt.Sprintf("-iTCP:%d", endpoint.Port), "-sTCP:LISTEN", "-Fpca",
+	}
 }
 
 func ParseLsofOwner(output string) (dataplane.ProcessIdentity, error) {
@@ -79,6 +113,21 @@ func (ExecResourceInspector) Snapshot(ctx context.Context, kinds []dataplane.Res
 	return snapshotResources(ctx, kinds, false)
 }
 
+func (ExecResourceInspector) FullTunnels(ctx context.Context) ([]FullTunnelObservation, error) {
+	ipv4, err := exec.CommandContext(ctx, "netstat", "-rn", "-f", "inet").Output()
+	if err != nil {
+		return nil, fmt.Errorf("inspect IPv4 routes: %w", err)
+	}
+	ipv6, err := exec.CommandContext(ctx, "netstat", "-rn", "-f", "inet6").Output()
+	if err != nil {
+		return nil, fmt.Errorf("inspect IPv6 routes: %w", err)
+	}
+	if len(strings.TrimSpace(string(ipv4))) == 0 || len(strings.TrimSpace(string(ipv6))) == 0 {
+		return nil, fmt.Errorf("inspect routes: netstat returned an empty route table")
+	}
+	return ParseFullTunnelObservations(string(ipv4), string(ipv6))
+}
+
 func (ExecResourceInspector) SnapshotLegacy(
 	ctx context.Context,
 	kinds []dataplane.ResourceKind,
@@ -93,22 +142,30 @@ func snapshotResources(
 ) (ResourceSnapshot, error) {
 	snapshot := ResourceSnapshot{}
 	for _, kind := range kinds {
-		var command []string
+		var commands [][]string
 		switch kind {
 		case dataplane.ResourceTUN:
-			command = []string{"ifconfig", "-l"}
+			commands = [][]string{{"ifconfig", "-l"}}
 		case dataplane.ResourceRoute:
-			command = []string{"netstat", "-rn", "-f", "inet"}
+			commands = [][]string{{"netstat", "-rn", "-f", "inet"}}
+			if !legacy {
+				commands = append(commands, []string{"netstat", "-rn", "-f", "inet6"})
+			}
 		case dataplane.ResourceDNS:
-			command = []string{"scutil", "--dns"}
+			commands = [][]string{{"scutil", "--dns"}}
 		default:
 			continue
 		}
-		output, err := exec.CommandContext(ctx, command[0], command[1:]...).Output()
-		if err != nil {
-			return nil, err
+		var output strings.Builder
+		for _, command := range commands {
+			part, err := exec.CommandContext(ctx, command[0], command[1:]...).Output()
+			if err != nil {
+				return nil, err
+			}
+			output.Write(part)
+			output.WriteByte('\n')
 		}
-		snapshot[kind] = fingerprintResourceOutput(kind, string(output), legacy)
+		snapshot[kind] = fingerprintResourceOutput(kind, output.String(), legacy)
 	}
 	return snapshot, nil
 }
@@ -134,23 +191,141 @@ func fingerprintResourceOutput(
 func FingerprintRouteLines(output string) []string {
 	var stable []string
 	for _, line := range strings.Split(output, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 4 || fields[0] == "Destination" {
+		_, interfaceName, _, normalized, ok := parseRouteLine(line)
+		if !ok {
 			continue
-		}
-		if _, err := strconv.Atoi(fields[len(fields)-1]); err == nil {
-			continue
-		}
-		interfaceName := fields[len(fields)-1]
-		if interfaceName == "!" {
-			interfaceName = fields[len(fields)-2]
 		}
 		stable = append(stable,
-			fingerprint(interfaceName)+":"+fingerprint(strings.Join(fields, " ")),
+			fingerprint(interfaceName)+":"+fingerprint(normalized),
 		)
 	}
 	sort.Strings(stable)
 	return stable
+}
+
+func ParseFullTunnelObservations(ipv4, ipv6 string) ([]FullTunnelObservation, error) {
+	var observations []FullTunnelObservation
+	for _, input := range []struct {
+		family string
+		output string
+	}{
+		{family: "ipv4", output: ipv4},
+		{family: "ipv6", output: ipv6},
+	} {
+		familyObservations, err := parseFullTunnelsForFamily(input.family, input.output)
+		if err != nil {
+			return nil, err
+		}
+		observations = append(observations, familyObservations...)
+	}
+	return observations, nil
+}
+
+func parseFullTunnelsForFamily(family, output string) ([]FullTunnelObservation, error) {
+	if strings.TrimSpace(output) != "" && !hasRouteTableHeader(output) {
+		return nil, fmt.Errorf("%s route table format is not recognized", family)
+	}
+	destinations := map[string]map[string]struct{}{}
+	for _, line := range strings.Split(output, "\n") {
+		destination, interfaceName, flags, _, ok := parseRouteLine(line)
+		if !ok || !strings.HasPrefix(interfaceName, "utun") || strings.Contains(flags, "I") {
+			continue
+		}
+		if destinations[interfaceName] == nil {
+			destinations[interfaceName] = map[string]struct{}{}
+		}
+		destinations[interfaceName][normalizeRouteDestination(family, destination)] = struct{}{}
+	}
+
+	interfaces := make([]string, 0, len(destinations))
+	for interfaceName := range destinations {
+		interfaces = append(interfaces, interfaceName)
+	}
+	sort.Strings(interfaces)
+
+	low, high := splitRouteDestinations(family)
+	var observations []FullTunnelObservation
+	var lowSeen, highSeen, pairedSeen bool
+	for _, interfaceName := range interfaces {
+		routes := destinations[interfaceName]
+		_, hasDefault := routes["default"]
+		_, hasLow := routes[low]
+		_, hasHigh := routes[high]
+		lowSeen = lowSeen || hasLow
+		highSeen = highSeen || hasHigh
+		shape := ""
+		switch {
+		case hasDefault:
+			shape = "default"
+		case hasLow && hasHigh:
+			shape = "split"
+			pairedSeen = true
+		}
+		if shape != "" {
+			observations = append(observations, FullTunnelObservation{
+				Interface: interfaceName, Family: family, Shape: shape,
+			})
+		}
+	}
+	if lowSeen && highSeen && !pairedSeen {
+		return nil, fmt.Errorf("%s split default routes span multiple tunnel interfaces", family)
+	}
+	return observations, nil
+}
+
+func hasRouteTableHeader(output string) bool {
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 4 && fields[0] == "Destination" &&
+			fields[1] == "Gateway" && fields[2] == "Flags" && fields[3] == "Netif" {
+			return true
+		}
+	}
+	return false
+}
+
+func parseRouteLine(line string) (
+	destination, interfaceName, flags, normalized string,
+	ok bool,
+) {
+	fields := strings.Fields(line)
+	if len(fields) < 4 || fields[0] == "Destination" {
+		return "", "", "", "", false
+	}
+	if _, err := strconv.Atoi(fields[len(fields)-1]); err == nil {
+		return "", "", "", "", false
+	}
+	interfaceName = fields[len(fields)-1]
+	if interfaceName == "!" {
+		if len(fields) < 5 {
+			return "", "", "", "", false
+		}
+		interfaceName = fields[len(fields)-2]
+	}
+	return fields[0], interfaceName, fields[2], strings.Join(fields, " "), true
+}
+
+func normalizeRouteDestination(family, destination string) string {
+	destination = strings.ToLower(destination)
+	if destination == "default" || destination == "0.0.0.0/0" || destination == "::/0" {
+		return "default"
+	}
+	if family == "ipv4" {
+		switch destination {
+		case "0.0.0.0/1":
+			return "0/1"
+		case "128.0/1", "128.0.0.0/1":
+			return "128/1"
+		}
+	}
+	return destination
+}
+
+func splitRouteDestinations(family string) (string, string) {
+	if family == "ipv6" {
+		return "::/1", "8000::/1"
+	}
+	return "0/1", "128/1"
 }
 
 func FingerprintInterfaceNames(output string) []string {
