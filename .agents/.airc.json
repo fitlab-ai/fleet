@@ -168,5 +168,9 @@
       "enabled": true,
       "installInSandbox": true
     }
-  ]
+  ],
+  "delivery": {
+    "remote": "origin",
+    "baseRef": "main"
+  }
 }
