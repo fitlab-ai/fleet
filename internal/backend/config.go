@@ -2,6 +2,8 @@ package backend
 
 import (
 	"fmt"
+	"net"
+	"strings"
 
 	"github.com/fitlab-ai/fleet/internal/model"
 )
@@ -15,6 +17,13 @@ func boolValue(value any) bool {
 }
 
 func outbound(node model.Node) (map[string]any, error) {
+	return outboundForDial(node, node.Server)
+}
+
+func outboundForDial(node model.Node, dialServer string) (map[string]any, error) {
+	if dialServer == "" {
+		dialServer = node.Server
+	}
 	out := map[string]any{"tag": "proxy"}
 	switch node.Type {
 	case "vmess":
@@ -26,7 +35,7 @@ func outbound(node model.Node) (map[string]any, error) {
 		if security == "" {
 			security = "auto"
 		}
-		out["type"], out["server"], out["server_port"] = "vmess", node.Server, node.Port
+		out["type"], out["server"], out["server_port"] = "vmess", dialServer, node.Port
 		out["uuid"], out["security"], out["alter_id"] = node.UUID, security, alterID
 		if node.Network == "ws" {
 			transport := map[string]any{"type": "ws", "path": "/"}
@@ -54,6 +63,10 @@ func outbound(node model.Node) (map[string]any, error) {
 					}
 				}
 			}
+			if dialServer != node.Server && net.ParseIP(node.Server) == nil &&
+				!hasHeader(headers, "Host") {
+				headers["Host"] = node.Server
+			}
 			if len(headers) > 0 {
 				transport["headers"] = headers
 			}
@@ -64,7 +77,7 @@ func outbound(node model.Node) (map[string]any, error) {
 		if serverName == "" {
 			serverName = node.Server
 		}
-		out["type"], out["server"], out["password"] = "hysteria2", node.Server, node.Password
+		out["type"], out["server"], out["password"] = "hysteria2", dialServer, node.Password
 		out["tls"] = map[string]any{"enabled": true, "server_name": serverName, "insecure": boolValue(node.SkipCertVerify)}
 		internal, _ := node.Extra["_fleet_hysteria2"].(map[string]any)
 		if ports := internal["server_ports"]; ports != nil {
@@ -98,12 +111,21 @@ func outbound(node model.Node) (map[string]any, error) {
 		if fingerprint, ok := node.Extra["client-fingerprint"].(string); ok && fingerprint != "" && node.Type == "anytls" {
 			tls["utls"] = map[string]any{"enabled": true, "fingerprint": fingerprint}
 		}
-		out["type"], out["server"], out["server_port"] = node.Type, node.Server, node.Port
+		out["type"], out["server"], out["server_port"] = node.Type, dialServer, node.Port
 		out["password"], out["tls"] = node.Password, tls
 	default:
 		return nil, model.NewError("protocol", "Unsupported proxy protocol", nil)
 	}
 	return out, nil
+}
+
+func hasHeader(headers map[string]any, name string) bool {
+	for key := range headers {
+		if strings.EqualFold(key, name) {
+			return true
+		}
+	}
+	return false
 }
 
 func BuildProxyConfig(node model.Node, port int) (map[string]any, error) {
@@ -123,22 +145,44 @@ func BuildProxyConfig(node model.Node, port int) (map[string]any, error) {
 }
 
 func BuildTUNConfig(node model.Node, port int) (map[string]any, error) {
-	proxy, err := outbound(node)
+	return buildTUNConfig(node, port, nil)
+}
+
+func buildTUNConfig(node model.Node, port int, routeExclusions []string) (map[string]any, error) {
+	return buildTUNConfigForDial(node, port, node.Server, routeExclusions)
+}
+
+func buildTUNConfigForDial(
+	node model.Node,
+	port int,
+	dialServer string,
+	routeExclusions []string,
+) (map[string]any, error) {
+	proxy, err := outboundForDial(node, dialServer)
 	if err != nil {
 		return nil, err
+	}
+	tunInbound := map[string]any{
+		"type": "tun", "tag": "tun-in", "address": []any{TUNAddress},
+		"mtu": 9000, "auto_route": true, "strict_route": true, "stack": "system",
+	}
+	if len(routeExclusions) > 0 {
+		tunInbound["route_exclude_address"] = routeExclusions
 	}
 	return map[string]any{
 		"log": map[string]any{"level": "warn"},
 		"dns": map[string]any{
 			"servers": []any{
-				map[string]any{"tag": "dns-remote", "address": "https://1.1.1.1/dns-query", "detour": "proxy"},
-				map[string]any{"tag": "dns-local", "address": "local", "detour": "direct"},
+				map[string]any{
+					"type": "https", "tag": "dns-remote", "server": "1.1.1.1",
+					"path": "/dns-query", "detour": "proxy",
+				},
+				map[string]any{"type": "local", "tag": "dns-local", "prefer_go": true},
 			},
-			"rules": []any{map[string]any{"outbound": "any", "server": "dns-local"}},
 			"final": "dns-remote", "strategy": "ipv4_only", "reverse_mapping": true,
 		},
 		"inbounds": []any{
-			map[string]any{"type": "tun", "tag": "tun-in", "address": []any{TUNAddress}, "mtu": 9000, "auto_route": true, "strict_route": true, "stack": "system"},
+			tunInbound,
 			map[string]any{"type": "mixed", "tag": "mixed-in", "listen": Host, "listen_port": port},
 		},
 		"outbounds": []any{proxy, map[string]any{"type": "direct", "tag": "direct"}},

@@ -212,9 +212,25 @@ go test -race ./...
 
 Fleet is implemented exclusively by the Go control plane built from
 `cmd/fleet`; the retired Python entry point is not a supported runtime or
-rollback target. The Go implementation is split into small internal packages for CLI
-orchestration, storage, subscriptions, Keychain access, sing-box configuration,
-macOS lifecycle operations, and diagnostics. `tests/compatibility-matrix.md` is
+rollback target. The Go implementation is split into small internal packages
+for CLI orchestration, storage, subscriptions, Keychain access, diagnostics,
+and three explicit data-plane layers:
+
+- `internal/dataplane` defines backend-neutral validation, rendering,
+  lifecycle, capability, error, and health contracts.
+- `internal/runtime` owns the single active runtime lease and its process, port,
+  lock, system-proxy, TUN, route, and DNS claims. Runtime state uses a versioned
+  schema and is written atomically with owner-only permissions.
+- `internal/backend` contains adapters and backend-specific configuration.
+  sing-box is the default adapter; another adapter can be registered without
+  moving operating-system resource ownership into the CLI.
+
+Subscription refresh first performs static validation and then validates only
+the configured data-plane adapter. An unused registered adapter cannot block
+publication. Lifecycle cleanup restores the macOS proxy only while it is still
+owned by Fleet, so an external proxy change is not overwritten.
+
+`tests/compatibility-matrix.md` is
 the permanent compatibility ledger for all 48 historical behavior IDs. Its Go
 gate verifies that every ID has one terminal evidence row and that every cited
 Go test symbol exists, without retaining or executing the retired Python tests.

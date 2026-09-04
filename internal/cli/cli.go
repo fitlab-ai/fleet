@@ -8,8 +8,11 @@ import (
 	"strings"
 
 	"github.com/fitlab-ai/fleet/internal/app"
+	"github.com/fitlab-ai/fleet/internal/backend"
 	"github.com/fitlab-ai/fleet/internal/credential"
+	"github.com/fitlab-ai/fleet/internal/dataplane"
 	"github.com/fitlab-ai/fleet/internal/platform"
+	fleetruntime "github.com/fitlab-ai/fleet/internal/runtime"
 )
 
 type Dependencies struct {
@@ -68,8 +71,32 @@ func makeApp(deps Dependencies) *app.App {
 		return deps.App
 	}
 	runner := platform.ExecRunner{}
+	config := app.DefaultConfig()
+	singBox := &backend.SingBox{
+		Binary: config.SingBox, Runner: runner,
+		Launcher: platform.ExecLauncher{}, Inspector: platform.ExecProcessInspector{},
+		Authorizer: platform.SudoAuthorizer{
+			Stdin: deps.In, Stdout: deps.Out, Stderr: deps.Out,
+		},
+	}
+	dataPlanes, err := dataplane.NewRegistry("sing-box", singBox)
+	if err != nil {
+		panic(err)
+	}
+	runtimeManager := &fleetruntime.Manager{
+		Registry:   dataPlanes,
+		Store:      fleetruntime.NewStateStore(filepath.Join(config.Dir, "state.json")),
+		RuntimeDir: config.Dir, Configured: config.Backend,
+		Proxy: platform.NewProxyManager(), Resources: platform.ExecResourceInspector{},
+	}
+	runtimeManager.ReconcileLegacy = func(state *fleetruntime.State) error {
+		return state.ReconcileLegacy(
+			platform.ExecProcessInspector{}, config.Dir, config.SingBox,
+		)
+	}
 	return &app.App{
-		Config: app.DefaultConfig(), Credentials: credential.NewKeychain(runner),
+		Config: config, Credentials: credential.NewKeychain(runner),
+		DataPlanes: dataPlanes, Runtime: runtimeManager,
 		Out: deps.Out, In: deps.In,
 	}
 }

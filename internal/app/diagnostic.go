@@ -2,17 +2,14 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"sort"
 	"sync"
 	"time"
 
-	"github.com/fitlab-ai/fleet/internal/backend"
+	"github.com/fitlab-ai/fleet/internal/dataplane"
 	"github.com/fitlab-ai/fleet/internal/model"
 )
 
@@ -80,13 +77,13 @@ func (a *App) Health(target string) int {
 		targets = []model.Node{node}
 	}
 	a.printf("PROXY HEALTH: verifies an HTTPS request through each Fleet outbound.\n")
+	if a.DataPlanes == nil {
+		a.printf("Data plane registry is not configured\n")
+		return 1
+	}
 	failures := 0
 	for _, node := range targets {
-		probe := a.healthProbe
-		if probe == nil {
-			probe = a.probeHealth
-		}
-		status, elapsed := probe(node)
+		status, elapsed := a.probeHealthDataPlane(node)
 		if status != "HEALTHY" {
 			failures++
 		}
@@ -102,85 +99,55 @@ func (a *App) Health(target string) int {
 	return 0
 }
 
-func (a *App) probeHealth(node model.Node) (string, int64) {
-	attempt := a.healthTry
-	if attempt == nil {
-		attempt = a.probeHealthAttempt
+func (a *App) probeHealthDataPlane(node model.Node) (string, int64) {
+	plane, err := a.DataPlanes.Configured(a.Config.Backend)
+	if err != nil {
+		return "DEPENDENCY_ERROR", -1
 	}
-	for try := 0; try < 2; try++ {
-		status, elapsed, retry := attempt(node)
-		if !retry {
-			return status, elapsed
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	validate := dataplane.ValidateRequest{
+		Backend: plane.ID(), Purpose: dataplane.ValidationProbe,
+		Mode: dataplane.ModeProxy, Nodes: []model.Node{node},
+	}
+	capabilities, err := plane.Capabilities(ctx)
+	if err != nil {
+		return "DEPENDENCY_ERROR", -1
+	}
+	if err := capabilities.Require(validate); err != nil {
+		return "CONFIG_ERROR", -1
+	}
+	if err := plane.Validate(ctx, validate); err != nil {
+		if dataplane.IsCode(err, dataplane.CodeDependency) {
+			return "DEPENDENCY_ERROR", -1
 		}
+		return "CONFIG_ERROR", -1
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		result, probeErr := plane.Probe(ctx, dataplane.ProbeRequest{
+			Kind: dataplane.ProbeOutbound, Node: &node,
+			Target: os.Getenv("FLEET_HEALTH_URL"),
+		})
+		if probeErr != nil {
+			if dataplane.IsCode(probeErr, dataplane.CodeDependency) {
+				return "DEPENDENCY_ERROR", -1
+			}
+			if dataplane.IsCode(probeErr, dataplane.CodeStart) && attempt == 0 {
+				continue
+			}
+			return "START_FAILED", -1
+		}
+		elapsed := result.Latency.Milliseconds()
+		if result.Status == dataplane.HealthHealthy {
+			return "HEALTHY", elapsed
+		}
+		if result.Reason == dataplane.CodeStart && attempt == 0 {
+			continue
+		}
+		if result.Reason == dataplane.CodeStart {
+			return "START_FAILED", -1
+		}
+		return "UNHEALTHY", elapsed
 	}
 	return "START_FAILED", -1
-}
-
-func (a *App) probeHealthAttempt(node model.Node) (string, int64, bool) {
-	if _, err := os.Stat(a.Config.SingBox); err != nil {
-		return "DEPENDENCY_ERROR", -1, false
-	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return "START_FAILED", -1, false
-	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	_ = listener.Close()
-	config, _ := backend.BuildProxyConfig(node, port)
-	data, _ := json.Marshal(config)
-	root, _ := os.MkdirTemp("", "fleet-health-")
-	defer os.RemoveAll(root)
-	path := filepath.Join(root, "config.json")
-	writeFile := a.writeFile
-	if writeFile == nil {
-		writeFile = os.WriteFile
-	}
-	if err := writeFile(path, data, 0o600); err != nil {
-		return "CONFIG_ERROR", -1, false
-	}
-	log, _ := os.OpenFile(filepath.Join(root, "sing-box.log"), os.O_CREATE|os.O_WRONLY, 0o600)
-	cmd := exec.Command(a.Config.SingBox, "run", "-c", path, "-D", root)
-	cmd.Stdout, cmd.Stderr = log, log
-	if err := cmd.Start(); err != nil {
-		_ = log.Close()
-		return "START_FAILED", -1, false
-	}
-	exited := make(chan error, 1)
-	go func() { exited <- cmd.Wait() }()
-	defer func() {
-		_ = cmd.Process.Kill()
-		select {
-		case <-exited:
-		case <-time.After(time.Second):
-		}
-		_ = log.Close()
-	}()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		select {
-		case <-exited:
-			return "START_FAILED", -1, true
-		default:
-		}
-		conn, connectErr := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 100*time.Millisecond)
-		if connectErr == nil {
-			_ = conn.Close()
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	target := os.Getenv("FLEET_HEALTH_URL")
-	if target == "" {
-		target = "https://api.github.com"
-	}
-	start := time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
-	defer cancel()
-	curl := exec.CommandContext(ctx, "curl", "--proxy", fmt.Sprintf("http://127.0.0.1:%d", port), "--noproxy", "", "--silent", "--output", "/dev/null", "--write-out", "%{http_code}", "--connect-timeout", "10", "--max-time", "10", target)
-	output, err := curl.Output()
-	elapsed := time.Since(start).Milliseconds()
-	if err == nil && len(output) == 3 && output[0] >= '1' && output[0] <= '5' {
-		return "HEALTHY", elapsed, false
-	}
-	return "UNHEALTHY", elapsed, false
 }

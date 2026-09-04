@@ -198,7 +198,8 @@ func TestRefreshIsolatesFailuresAndPublishesCounts(t *testing.T) {
 		}
 		return []byte("proxies:\n  - {name: trojan, type: trojan, server: good.example, port: 443, password: p}\n"), nil
 	}
-	app.validate = func([]model.Node, int) error { return nil }
+	app.DataPlanes = testDataPlanes(t)
+	app.Config.Backend = "sing-box"
 	if app.Refresh("", false) != 1 {
 		t.Fatal("partial failure must return nonzero")
 	}
@@ -222,7 +223,8 @@ func TestRefreshIsolatesPerSubscriptionDiskFailure(t *testing.T) {
 	app.download = func(string) ([]byte, error) {
 		return []byte("proxies:\n  - {name: node, type: vmess, server: example.com, port: 443, uuid: id}\n"), nil
 	}
-	app.validate = func([]model.Node, int) error { return nil }
+	app.DataPlanes = testDataPlanes(t)
+	app.Config.Backend = "sing-box"
 	app.publish = func(target string, source []byte, nodes []model.Node) (string, error) {
 		if strings.Contains(target, firstID) {
 			return "", errors.New("disk full")

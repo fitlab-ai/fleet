@@ -2,6 +2,9 @@ package backend
 
 import (
 	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 
 	"github.com/fitlab-ai/fleet/internal/model"
@@ -43,5 +46,83 @@ func TestHysteria2MapsConnectionOptions(t *testing.T) {
 	out := cfg["outbounds"].([]any)[0].(map[string]any)
 	if out["hop_interval"] != "5s" || out["up_mbps"] != 10 {
 		t.Fatalf("missing options: %#v", out)
+	}
+}
+
+func TestTUNConfigUsesCurrentDNSServerFormat(t *testing.T) {
+	node := model.Node{
+		Name: "t", Type: "trojan", Server: "example.com",
+		Port: 443, Password: "secret", SNI: "example.com",
+	}
+	config, err := BuildTUNConfig(node, 7890)
+	if err != nil {
+		t.Fatal(err)
+	}
+	servers := config["dns"].(map[string]any)["servers"].([]any)
+	want := []any{
+		map[string]any{
+			"type": "https", "tag": "dns-remote", "server": "1.1.1.1",
+			"path": "/dns-query", "detour": "proxy",
+		},
+		map[string]any{"type": "local", "tag": "dns-local", "prefer_go": true},
+	}
+	gotJSON, _ := json.Marshal(servers)
+	wantJSON, _ := json.Marshal(want)
+	if string(gotJSON) != string(wantJSON) {
+		t.Fatalf("DNS servers:\n got %s\nwant %s", gotJSON, wantJSON)
+	}
+}
+
+func TestTUNConfigAcceptedByInstalledSingBox(t *testing.T) {
+	binary, err := exec.LookPath("sing-box")
+	if err != nil {
+		t.Skip("sing-box is not installed")
+	}
+	node := model.Node{
+		Name: "t", Type: "trojan", Server: "example.com",
+		Port: 443, Password: "secret", SNI: "example.com",
+	}
+	config, err := BuildTUNConfig(node, 7890)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command(binary, "check", "-c", path).CombinedOutput(); err != nil {
+		t.Fatalf("sing-box check failed: %v\n%s", err, output)
+	}
+}
+
+func TestTUNConfigWithRouteExclusionsAcceptedByInstalledSingBox(t *testing.T) {
+	binary, err := exec.LookPath("sing-box")
+	if err != nil {
+		t.Skip("sing-box is not installed")
+	}
+	node := model.Node{
+		Name: "t", Type: "trojan", Server: "example.com",
+		Port: 443, Password: "secret", SNI: "example.com",
+	}
+	config, err := buildTUNConfigForDial(
+		node, 7890, "203.0.113.1", []string{"203.0.113.1/32"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command(binary, "check", "-c", path).CombinedOutput(); err != nil {
+		t.Fatalf("sing-box check with route exclusions failed: %v\n%s", err, output)
 	}
 }
