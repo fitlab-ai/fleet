@@ -138,6 +138,14 @@ func (s *SingBox) Render(ctx context.Context, request dataplane.RenderRequest) (
 	}, nil
 }
 
+// resolveDialAddress pins a single resolved address to dial and to exclude
+// from the TUN route. This is a deliberate design choice: sing-box dials one
+// server address per outbound, and every dialed address must be excluded from
+// the tunnel to avoid a routing loop. Known limitation: when a hostname
+// resolves to multiple addresses across address families (or a CDN changes its
+// answers), only the deterministically chosen address is reachable, so an
+// unreachable pinned address cannot transparently fall back to another
+// A/AAAA record. Reworking this needs a per-family/failover dial policy.
 func (s *SingBox) resolveDialAddress(ctx context.Context, server string) (string, string, error) {
 	var addresses []net.IPAddr
 	if ip := net.ParseIP(server); ip != nil {
