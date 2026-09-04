@@ -18,8 +18,15 @@ import (
 	"github.com/fitlab-ai/fleet/internal/dataplane"
 )
 
+// FingerprintArgs returns a stable hash of the given argument vector. The
+// canonicalization whitespace-normalizes the space-joined command line so that
+// a fingerprint derived from real argv (which can contain arguments with
+// spaces, such as a config path under a home directory that contains spaces)
+// matches one derived from `ps` output, where argument boundaries are already
+// lost and the line is re-tokenized by whitespace.
 func FingerprintArgs(args []string) string {
-	sum := sha256.Sum256([]byte(strings.Join(args, "\x00")))
+	canonical := strings.Join(strings.Fields(strings.Join(args, " ")), " ")
+	sum := sha256.Sum256([]byte(canonical))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -214,8 +221,27 @@ func (ExecLauncher) Start(ctx context.Context, request LaunchRequest) (ProcessHa
 	}
 	cmd := exec.Command(request.Command[0], request.Command[1:]...)
 	cmd.Env = os.Environ()
-	for key, value := range request.Environment {
-		cmd.Env = append(cmd.Env, key+"="+value)
+	// Override existing variables in place instead of appending duplicates:
+	// with two entries for the same key, getenv returns the first match and the
+	// requested value would silently be ignored.
+	if len(request.Environment) > 0 {
+		position := make(map[string]int, len(cmd.Env))
+		for i, entry := range cmd.Env {
+			key, _, ok := strings.Cut(entry, "=")
+			if ok {
+				if _, exists := position[key]; !exists {
+					position[key] = i
+				}
+			}
+		}
+		for key, value := range request.Environment {
+			if i, exists := position[key]; exists {
+				cmd.Env[i] = key + "=" + value
+			} else {
+				cmd.Env = append(cmd.Env, key+"="+value)
+				position[key] = len(cmd.Env) - 1
+			}
+		}
 	}
 	cmd.Stdout, cmd.Stderr = request.Stdout, request.Stderr
 	if request.NewSession {

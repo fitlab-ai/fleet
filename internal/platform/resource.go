@@ -77,7 +77,17 @@ func (ExecResourceInspector) PortOwner(ctx context.Context, endpoint dataplane.L
 		}
 		return dataplane.ProcessIdentity{}, err
 	}
-	return ParseLsofOwner(string(output))
+	owner, err := ParseLsofOwner(string(output))
+	if err != nil {
+		return dataplane.ProcessIdentity{}, err
+	}
+	// lsof only tells us the PID reliably; resolve the real executable and
+	// argument fingerprint via ps so the identity can be compared with one
+	// produced by ExecProcessInspector.
+	if inspected, inspectErr := (ExecProcessInspector{}).Inspect(owner.PID); inspectErr == nil {
+		return inspected, nil
+	}
+	return owner, nil
 }
 
 func portOwnerCommand(endpoint dataplane.ListenEndpoint) []string {
@@ -92,30 +102,28 @@ func portOwnerCommand(endpoint dataplane.ListenEndpoint) []string {
 func ParseLsofOwner(output string) (dataplane.ProcessIdentity, error) {
 	var pid int
 	var command string
-	var args []string
 	scanner := bufio.NewScanner(strings.NewReader(output))
 	for scanner.Scan() {
 		line := scanner.Text()
 		if len(line) < 2 {
 			continue
 		}
+		// lsof -Fpca emits one record per open file; 'p' is the process ID and
+		// 'c' the command name. The 'a' field is the file access mode, not part
+		// of the process argument vector, so it must be ignored here. Callers
+		// that need a comparable identity resolve the real argv through ps.
 		switch line[0] {
 		case 'p':
 			pid, _ = strconv.Atoi(line[1:])
 		case 'c':
 			command = line[1:]
-		case 'a':
-			args = append(args, line[1:])
 		}
 	}
 	if pid <= 0 {
 		return dataplane.ProcessIdentity{}, fmt.Errorf("port owner unavailable")
 	}
-	if len(args) == 0 {
-		args = []string{command}
-	}
 	return dataplane.ProcessIdentity{
-		PID: pid, Executable: command, ArgsFingerprint: FingerprintArgs(args),
+		PID: pid, Executable: command,
 	}, nil
 }
 

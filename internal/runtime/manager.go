@@ -280,7 +280,7 @@ func (m *Manager) Stop(ctx context.Context) (bool, error) {
 			return false, ownErr
 		}
 		if owned {
-			if err := m.proxy().Restore(ctx, state.SystemProxyBefore); err != nil {
+			if err := m.proxy().Restore(ctx, state.SystemProxyBefore, "127.0.0.1", state.Port); err != nil {
 				state.Phase, state.LastError = PhaseDegraded, err.Error()
 				_ = m.Store.Save(state)
 				return false, err
@@ -497,7 +497,7 @@ func (m *Manager) failStart(
 		if err != nil {
 			cleanupErr = errors.Join(cleanupErr, err)
 		} else if owned {
-			cleanupErr = errors.Join(cleanupErr, m.proxy().Restore(cleanupCtx, state.SystemProxyBefore))
+			cleanupErr = errors.Join(cleanupErr, m.proxy().Restore(cleanupCtx, state.SystemProxyBefore, "127.0.0.1", state.Port))
 		}
 	}
 	if cleanupErr == nil {
@@ -632,6 +632,12 @@ func (m *Manager) verifyResourcesRestored(ctx context.Context, state *State) err
 			}
 			continue
 		}
+		// Fleet can only prove ownership of the resources it added (ResourceOwned).
+		// Pre-existing baseline entries may legitimately disappear during a session
+		// because of external network drift (roaming to another network changes the
+		// default route and the DNS resolvers), so stop must not fail just because a
+		// baseline entry is no longer present. Requiring every owned resource to be
+		// gone is the check that guarantees Fleet cleaned up after itself.
 		if owned, ok := state.ResourceOwned[kind]; ok {
 			if snapshotsIntersect(current[kind], owned) {
 				return dataplane.NewError(
@@ -639,12 +645,6 @@ func (m *Manager) verifyResourcesRestored(ctx context.Context, state *State) err
 					"Runtime network resources were not fully restored", nil,
 				)
 			}
-		}
-		if !snapshotContainsAll(current[kind], state.ResourceBefore[kind]) {
-			return dataplane.NewError(
-				dataplane.CodeStop, "resource-restore", state.Instance.Backend,
-				"Runtime network resources were not fully restored", nil,
-			)
 		}
 	}
 	return nil

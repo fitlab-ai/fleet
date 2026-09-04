@@ -93,7 +93,7 @@ func (f *fakeProxy) Enable(context.Context, string, int) error {
 	f.owned = true
 	return nil
 }
-func (f *fakeProxy) Restore(context.Context, platform.ProxySnapshot) error {
+func (f *fakeProxy) Restore(context.Context, platform.ProxySnapshot, string, int) error {
 	f.restored++
 	return nil
 }
@@ -598,7 +598,7 @@ func TestManagerRollsBackWhenExternalFullTunnelAppearsDuringStart(t *testing.T) 
 	}
 }
 
-func TestManagerStopRejectsMissingBaselineResource(t *testing.T) {
+func TestManagerStopToleratesExternalRouteDrift(t *testing.T) {
 	plane := &fakePlane{id: "sing-box"}
 	manager := newTestManager(t, "", plane)
 	fleetTUN := platform.FingerprintInterfaceNames("utun9")[0]
@@ -632,8 +632,12 @@ func TestManagerStopRejectsMissingBaselineResource(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.Stop(t.Context()); !dataplane.IsCode(err, dataplane.CodeStop) {
-		t.Fatalf("stop error = %v, want missing baseline failure", err)
+	// The pre-existing default route and DNS baseline may disappear while the
+	// tunnel is up because of external network drift; as long as Fleet-owned
+	// resources are gone the stop must succeed.
+	stopped, err := manager.Stop(t.Context())
+	if err != nil || !stopped {
+		t.Fatalf("stop = %v, %v; want success despite external drift", stopped, err)
 	}
 }
 

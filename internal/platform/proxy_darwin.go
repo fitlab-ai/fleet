@@ -4,8 +4,10 @@ package platform
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -80,28 +82,62 @@ func (NetworkSetupProxy) Enable(ctx context.Context, host string, port int) erro
 	return nil
 }
 
-func (NetworkSetupProxy) Restore(ctx context.Context, snapshot ProxySnapshot) error {
-	for service, settings := range snapshot {
-		for kind, setting := range settings {
+// Restore reverts Fleet-owned proxy entries back to baseline. Only entries
+// that are currently enabled and point at host:port are considered owned by
+// Fleet and therefore reverted; anything the user changed independently during
+// the session (for example a corporate proxy added while Fleet was running) is
+// left untouched. Services that were captured at start but have since been
+// removed are skipped because they no longer exist in the current snapshot.
+// A failure on one service does not abort the remaining restores.
+func (NetworkSetupProxy) Restore(
+	ctx context.Context,
+	snapshot ProxySnapshot,
+	host string,
+	port int,
+) error {
+	current, err := (NetworkSetupProxy{}).Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	wantPort := strconv.Itoa(port)
+	services := make([]string, 0, len(current))
+	for service := range current {
+		services = append(services, service)
+	}
+	sort.Strings(services)
+	var firstErr error
+	for _, service := range services {
+		kinds := make([]string, 0, len(current[service]))
+		for kind := range current[service] {
+			kinds = append(kinds, kind)
+		}
+		sort.Strings(kinds)
+		for _, kind := range kinds {
 			spec, exists := proxyKinds[kind]
 			if !exists {
 				continue
 			}
-			if setting.Server != "" && setting.Port != "" && setting.Port != "0" {
-				if err := exec.CommandContext(ctx, "networksetup", spec[1], service, setting.Server, setting.Port).Run(); err != nil {
-					return err
+			setting := current[service][kind]
+			if !setting.Enabled || setting.Server != host || setting.Port != wantPort {
+				continue
+			}
+			baseline := snapshot[service][kind]
+			if baseline.Server != "" && baseline.Port != "" && baseline.Port != "0" {
+				if err := exec.CommandContext(ctx, "networksetup", spec[1], service, baseline.Server, baseline.Port).Run(); err != nil {
+					firstErr = errors.Join(firstErr, err)
+					continue
 				}
 			}
 			state := "off"
-			if setting.Enabled {
+			if baseline.Enabled {
 				state = "on"
 			}
 			if err := exec.CommandContext(ctx, "networksetup", spec[2], service, state).Run(); err != nil {
-				return err
+				firstErr = errors.Join(firstErr, err)
 			}
 		}
 	}
-	return nil
+	return firstErr
 }
 
 func (NetworkSetupProxy) OwnedBy(ctx context.Context, host string, port int) (bool, error) {
@@ -110,18 +146,14 @@ func (NetworkSetupProxy) OwnedBy(ctx context.Context, host string, port int) (bo
 		return false, err
 	}
 	wantPort := strconv.Itoa(port)
-	found := false
 	for _, settings := range snapshot {
 		for _, setting := range settings {
-			if setting.Enabled {
-				found = true
-				if setting.Server != host || setting.Port != wantPort {
-					return false, nil
-				}
+			if setting.Enabled && setting.Server == host && setting.Port == wantPort {
+				return true, nil
 			}
 		}
 	}
-	return found, nil
+	return false, nil
 }
 
 func (NetworkSetupProxy) Summary(ctx context.Context) (string, error) {

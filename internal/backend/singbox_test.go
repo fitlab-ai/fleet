@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -140,6 +141,13 @@ func (i *exitingInspector) Inspect(int) (dataplane.ProcessIdentity, error) {
 }
 
 func (*exitingInspector) Signal(dataplane.ProcessIdentity, os.Signal) error { return nil }
+
+type failingInspector struct{}
+
+func (failingInspector) Inspect(int) (dataplane.ProcessIdentity, error) {
+	return dataplane.ProcessIdentity{}, errors.New("inspection unavailable")
+}
+func (failingInspector) Signal(dataplane.ProcessIdentity, os.Signal) error { return nil }
 
 type fixedResolver struct {
 	addresses []net.IPAddr
@@ -587,6 +595,33 @@ func TestSingBoxTUNExportRendersOfflineWithoutRouteExclusions(t *testing.T) {
 	wantJSON = append(wantJSON, '\n')
 	if string(artifact.Bytes) != string(wantJSON) {
 		t.Fatalf("offline export:\n got %s\nwant %s", artifact.Bytes, wantJSON)
+	}
+}
+
+func TestSingBoxStopFailsWhileProcessIsAliveAndUninspectable(t *testing.T) {
+	child := exec.Command("/bin/sleep", "30")
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer child.Process.Kill()
+	identity := dataplane.ProcessIdentity{
+		PID: child.Process.Pid, Executable: "/bin/sleep",
+	}
+	box := &SingBox{Inspector: failingInspector{}}
+	err := box.Stop(t.Context(), dataplane.Instance{Process: identity})
+	var planeErr *dataplane.Error
+	if !errors.As(err, &planeErr) || planeErr.Code != dataplane.CodeOwnershipUnknown {
+		t.Fatalf("error = %v, want ownership-unknown while process is alive", err)
+	}
+}
+
+func TestSingBoxStopTreatsMissingProcessAsAlreadyStopped(t *testing.T) {
+	identity := dataplane.ProcessIdentity{
+		PID: 2147483646, Executable: "/bin/sleep",
+	}
+	box := &SingBox{Inspector: failingInspector{}}
+	if err := box.Stop(t.Context(), dataplane.Instance{Process: identity}); err != nil {
+		t.Fatalf("stop of a gone process = %v, want nil", err)
 	}
 }
 

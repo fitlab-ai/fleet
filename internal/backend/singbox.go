@@ -364,6 +364,16 @@ func (s *SingBox) Stop(ctx context.Context, instance dataplane.Instance) error {
 	}
 	current, err := inspector.Inspect(instance.Process.PID)
 	if err != nil {
+		// An inspection failure is only a successful stop when the process is
+		// genuinely gone. If it is still alive (a transient ps failure, a
+		// permission problem, or a race with exec), reporting success would
+		// leave a live sing-box untracked after the instance state is removed.
+		if processExists(instance.Process.PID) {
+			return dataplane.NewError(
+				dataplane.CodeOwnershipUnknown, "stop", s.ID(),
+				"sing-box process could not be inspected", err,
+			)
+		}
 		return nil
 	}
 	if !platform.SameProcess(current, instance.Process) {
@@ -588,12 +598,28 @@ func validHTTPStatus(value string) bool {
 	return len(value) == 3 && value[0] >= '1' && value[0] <= '5'
 }
 
+// processExists reports whether a process with the given pid is still alive,
+// probing with a signal-0 kill that neither delivers a signal nor requires the
+// caller to own the process (EPERM still means the process exists).
+func processExists(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	err := syscall.Kill(pid, 0)
+	return err == nil || err == syscall.EPERM
+}
+
 func waitForProcessExit(ctx context.Context, inspector platform.ProcessInspector, pid int) error {
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		if _, err := inspector.Inspect(pid); err != nil {
-			return nil
+			// Only treat the process as exited when a liveness probe confirms
+			// it is really gone; a transient inspection error must not be
+			// mistaken for a successful exit.
+			if !processExists(pid) {
+				return nil
+			}
 		}
 		select {
 		case <-ctx.Done():

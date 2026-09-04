@@ -10,11 +10,13 @@ import (
 )
 
 func TestParseLsofOwnerReturnsStableIdentity(t *testing.T) {
-	owner, err := ParseLsofOwner("p4242\ncsing-box\na/opt/homebrew/bin/sing-box\na run\na-c\na/tmp/config.json\n")
+	// The 'a' records are lsof access modes, not argv tokens, and must be
+	// ignored: a comparable argument fingerprint is resolved via ps instead.
+	owner, err := ParseLsofOwner("p4242\ncsing-box\na run\na-c\na/tmp/config.json\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if owner.PID != 4242 || owner.Executable != "sing-box" || owner.ArgsFingerprint == "" {
+	if owner.PID != 4242 || owner.Executable != "sing-box" || owner.ArgsFingerprint != "" {
 		t.Fatalf("owner = %#v", owner)
 	}
 }
