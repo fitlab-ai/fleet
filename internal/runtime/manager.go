@@ -242,6 +242,11 @@ func (m *Manager) Stop(ctx context.Context) (bool, error) {
 
 	state, err := m.Store.Load()
 	if errors.Is(err, os.ErrNotExist) {
+		// Without a state file there is no verifiable ownership of any running
+		// process, so Fleet deliberately refuses to signal arbitrary sing-box
+		// processes. This window is intentionally narrow: the state file is
+		// written before the data plane starts, and a partially launched
+		// process is torn down by the backend before Start reports failure.
 		return false, nil
 	}
 	if err != nil {

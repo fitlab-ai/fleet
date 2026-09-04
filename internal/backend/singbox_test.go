@@ -127,6 +127,16 @@ func (r *recordingRunner) Run(command []string, _ string, _ map[string]string, _
 	return platform.Result{}, nil
 }
 
+type processListRunner struct {
+	output string
+	calls  [][]string
+}
+
+func (r *processListRunner) Run(command []string, _ string, _ map[string]string, _ time.Duration) (platform.Result, error) {
+	r.calls = append(r.calls, append([]string(nil), command...))
+	return platform.Result{Stdout: r.output}, nil
+}
+
 type exitingInspector struct {
 	identity dataplane.ProcessIdentity
 	checks   int
@@ -317,6 +327,52 @@ func TestSingBoxTUNStartTerminatesLauncherWhenChildIdentityCannotBeResolved(t *t
 	terminated, killed := handle.cleanupSignals()
 	if !terminated || killed {
 		t.Fatalf("cleanup signals: terminated=%v killed=%v, want TERM without KILL", terminated, killed)
+	}
+}
+
+func TestSingBoxTUNStartTerminatesPrivilegedChildOnResolutionFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("privileged launch wrapper is only used by non-root Fleet")
+	}
+	handle := newCleanupHandle()
+	runtimeDir := t.TempDir()
+	args := []string{
+		"/opt/homebrew/bin/sing-box", "run", "-c", "/tmp/config.json", "-D", runtimeDir,
+	}
+	// The root sing-box child survives the sudo launcher teardown and must be
+	// discovered by its binary+argument identity and signalled explicitly.
+	runner := &processListRunner{
+		output: "5252 sing-box " + strings.Join(args, " ") + "\n",
+	}
+	inspector := &descendantInspector{resolve: errors.New("cannot resolve child")}
+	box := &SingBox{
+		Binary:     args[0],
+		Launcher:   cleanupLauncher{handle: handle},
+		Inspector:  inspector,
+		Runner:     runner,
+		Authorizer: acceptingAuthorizer{},
+	}
+	if _, err := box.Start(t.Context(), dataplane.StartRequest{
+		ArtifactPath: args[3], RuntimeDir: runtimeDir,
+		Mode: dataplane.ModeTUN, LeaseID: "lease",
+		Endpoint: dataplane.ListenEndpoint{Host: "127.0.0.1", Port: 7891},
+	}); err == nil {
+		t.Fatal("Start() error = nil, want identity resolution failure")
+	}
+	terminated, killed := handle.cleanupSignals()
+	if !terminated || killed {
+		t.Fatalf("launcher cleanup signals: terminated=%v killed=%v, want TERM only", terminated, killed)
+	}
+	killCommand := strings.Join([]string{"sudo", "-n", "kill", "-TERM", "5252"}, " ")
+	found := false
+	for _, call := range runner.calls {
+		if strings.Join(call, " ") == killCommand {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("privileged child was not signalled; commands = %#v", runner.calls)
 	}
 }
 

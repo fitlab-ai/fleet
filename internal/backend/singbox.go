@@ -272,7 +272,7 @@ func (s *SingBox) Start(ctx context.Context, request dataplane.StartRequest) (da
 	} else if request.Mode == dataplane.ModeTUN && os.Geteuid() != 0 {
 		resolver, ok := inspector.(platform.DescendantProcessResolver)
 		if !ok {
-			cleanupErr := terminateLaunchedProcess(handle, waitResult)
+			cleanupErr := s.terminateLaunchTree(ctx, handle, identity, waitResult)
 			return dataplane.Instance{}, dataplane.NewError(
 				dataplane.CodeStart, "start", s.ID(),
 				"Could not identify the privileged sing-box process",
@@ -302,7 +302,7 @@ func (s *SingBox) Start(ctx context.Context, request dataplane.StartRequest) (da
 			resolved, err = result.identity, result.err
 		}
 		if err != nil {
-			cleanupErr := terminateLaunchedProcess(handle, waitResult)
+			cleanupErr := s.terminateLaunchTree(ctx, handle, identity, waitResult)
 			return dataplane.Instance{}, dataplane.NewError(
 				dataplane.CodeStart, "start", s.ID(),
 				"Could not identify the privileged sing-box process",
@@ -320,6 +320,130 @@ func (s *SingBox) Start(ctx context.Context, request dataplane.StartRequest) (da
 			Key:  net.JoinHostPort(request.Endpoint.Host, strconv.Itoa(request.Endpoint.Port)),
 		}},
 	}, nil
+}
+
+// launchIdentityMatches reports whether a scanned process runs the same binary
+// with the same arguments as the launch we are tracking. PID is deliberately
+// ignored: the data-plane child has a different PID from the sudo launcher.
+func launchIdentityMatches(candidate, expected dataplane.ProcessIdentity) bool {
+	if expected.ArgsFingerprint == "" || candidate.ArgsFingerprint != expected.ArgsFingerprint {
+		return false
+	}
+	if expected.Executable == "" {
+		return false
+	}
+	return filepath.Clean(candidate.Executable) == filepath.Clean(expected.Executable)
+}
+
+// findMatchingProcesses scans the process table for running sing-box processes
+// (besides the launcher itself) whose binary and arguments match the expected
+// launch, i.e. a data-plane child that was forked under sudo.
+func (s *SingBox) findMatchingProcesses(
+	ctx context.Context,
+	expected dataplane.ProcessIdentity,
+	excludePID int,
+) ([]int, error) {
+	runner := s.Runner
+	if runner == nil {
+		runner = platform.ExecRunner{}
+	}
+	result, err := runner.Run([]string{"ps", "-axo", "pid=,comm=,args="}, "", nil, 5*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	var pids []int
+	for _, candidate := range platform.ParseProcessList(result.Stdout) {
+		if candidate.PID <= 0 || candidate.PID == excludePID {
+			continue
+		}
+		if launchIdentityMatches(candidate, expected) {
+			pids = append(pids, candidate.PID)
+		}
+	}
+	return pids, nil
+}
+
+// signalPID delivers a signal to a raw pid, going through sudo when Fleet is
+// not running as root (the data-plane child runs as root under a sudo launch).
+func (s *SingBox) signalPID(ctx context.Context, pid int, signal syscall.Signal) error {
+	if os.Geteuid() != 0 {
+		name := map[syscall.Signal]string{
+			syscall.SIGTERM: "TERM",
+			syscall.SIGKILL: "KILL",
+		}[signal]
+		if name == "" {
+			return fmt.Errorf("unsupported signal %d", signal)
+		}
+		runner := s.Runner
+		if runner == nil {
+			runner = platform.ExecRunner{}
+		}
+		result, err := runner.Run([]string{
+			"sudo", "-n", "kill", "-" + name, strconv.Itoa(pid),
+		}, "", nil, 10*time.Second)
+		if err != nil {
+			return err
+		}
+		if result.Code != 0 {
+			return fmt.Errorf("privileged signal failed")
+		}
+		return nil
+	}
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	return process.Signal(signal)
+}
+
+// terminateLaunchTree tears down a launch that failed before its data-plane
+// child identity could be resolved. It terminates the launcher and then any
+// surviving child running our binary with our arguments (the root sing-box is
+// reparented once the sudo launcher is gone, so it is discovered and signalled
+// explicitly rather than relying on sudo to forward signals).
+func (s *SingBox) terminateLaunchTree(
+	ctx context.Context,
+	handle platform.ProcessHandle,
+	expected dataplane.ProcessIdentity,
+	waitResult <-chan error,
+) error {
+	scanCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+	children, scanErr := s.findMatchingProcesses(scanCtx, expected, handle.PID())
+	cancel()
+	firstErr := terminateLaunchedProcess(handle, waitResult)
+	if scanErr != nil {
+		return errors.Join(firstErr, fmt.Errorf("scan sing-box descendants: %w", scanErr))
+	}
+	for _, pid := range children {
+		if err := s.signalPID(ctx, pid, syscall.SIGTERM); err != nil {
+			firstErr = errors.Join(firstErr, err)
+		}
+	}
+	grace, graceCancel := context.WithTimeout(context.WithoutCancel(ctx), 1500*time.Millisecond)
+	defer graceCancel()
+	alive := func() []int {
+		var surviving []int
+		for _, pid := range children {
+			if processExists(pid) {
+				surviving = append(surviving, pid)
+			}
+		}
+		return surviving
+	}
+	for len(alive()) > 0 {
+		select {
+		case <-grace.Done():
+		case <-time.After(50 * time.Millisecond):
+			continue
+		}
+		break
+	}
+	for _, pid := range alive() {
+		if err := s.signalPID(ctx, pid, syscall.SIGKILL); err != nil {
+			firstErr = errors.Join(firstErr, err)
+		}
+	}
+	return firstErr
 }
 
 func terminateLaunchedProcess(
@@ -430,27 +554,7 @@ func (s *SingBox) signal(
 	if instance.Mode != dataplane.ModeTUN || os.Geteuid() == 0 {
 		return inspector.Signal(instance.Process, signal)
 	}
-	name := map[syscall.Signal]string{
-		syscall.SIGTERM: "TERM",
-		syscall.SIGKILL: "KILL",
-	}[signal]
-	if name == "" {
-		return fmt.Errorf("unsupported signal %d", signal)
-	}
-	runner := s.Runner
-	if runner == nil {
-		runner = platform.ExecRunner{}
-	}
-	result, err := runner.Run([]string{
-		"sudo", "-n", "kill", "-" + name, strconv.Itoa(instance.Process.PID),
-	}, "", nil, 10*time.Second)
-	if err != nil {
-		return err
-	}
-	if result.Code != 0 {
-		return fmt.Errorf("privileged signal failed")
-	}
-	return nil
+	return s.signalPID(context.Background(), instance.Process.PID, signal)
 }
 
 func (s *SingBox) Probe(ctx context.Context, request dataplane.ProbeRequest) (dataplane.HealthResult, error) {
