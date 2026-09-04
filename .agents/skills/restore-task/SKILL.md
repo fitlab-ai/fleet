@@ -6,6 +6,8 @@ description: >
 ---
 
 # 还原任务
+> `--agent` 取值见 `.agents/rules/task-management.md`「合作者 token 规范」。
+
 
 从带有 sync 标记的平台 Issue 评论中恢复本地任务工作区文件。
 
@@ -57,6 +59,7 @@ description: >
   - `review-plan` / `review-plan-r{N}` -> 对应 `.md`
   - `code` / `code-r{N}` -> 对应 `.md`
   - `review-code` / `review-code-r{N}` -> 对应 `.md`
+  - `pr-review` / `pr-review-r{N}` -> 对应 `.md`
 
 ### 4. 处理分片并检查本地目录
 
@@ -87,7 +90,7 @@ description: >
 ### 6. 执行 restore 生命周期意图
 
 ```bash
-agent-infra-internal task-lifecycle {task-id} restore --agent {agent} \
+agent-infra-internal task-lifecycle {task-id} restore --agent {standard-agent-token} \
   --staging-dir "{staging-dir}" --issue-number {issue-number}
 ```
 

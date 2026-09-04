@@ -3,7 +3,7 @@
 #
 # 注：步骤中的 `pr_tasks` 列表按「走 PR 路径」判定是否计入工作流进度：
 # `.agents/.airc.json:prFlow="required"` 始终计入；`prFlow="disabled"` 不计入；
-# 字段缺省时仅当 task.md 的 `pr_status=skipped` 排除，否则计入（详见 .agents/skills/complete-task/SKILL.md）。
+# 字段缺省时仅当 task.md 的 `pr_delivery_fact.state=skipped` 排除，否则计入（详见 .agents/skills/complete-task/SKILL.md）。
 
 name: refactoring
 description: 安全且结构化的代码重构工作流。
@@ -13,7 +13,7 @@ steps:
     description: 分析当前代码并确定重构范围。
     recommended_agents:
       - claude
-      - gemini
+      - antigravity
     tasks:
       - 识别待重构的代码及重构原因
       - 映射受影响代码的所有依赖项和使用者
@@ -37,7 +37,7 @@ steps:
     description: 审查重构分析是否覆盖依赖、风险和测试基线。
     recommended_agents:
       - claude
-      - gemini
+      - antigravity
     tasks:
       - 验证待重构范围和原因
       - 检查依赖关系、使用者和风险识别
@@ -93,7 +93,7 @@ steps:
     description: 审查重构方案是否保持行为稳定、步骤可验证且风险可控。
     recommended_agents:
       - claude
-      - gemini
+      - antigravity
     tasks:
       - 验证方案覆盖已批准的范围分析
       - 检查增量步骤、测试策略和回滚风险
@@ -127,6 +127,7 @@ steps:
       - 每步后验证测试通过
       - 修复最新 code-review 产物中要求处理的问题（如处于修复模式）
       - 更新受影响的文档或注释
+      - 测试通过后创建本地 checkpoint commit
       - 确保代码遵循项目规范
     inputs:
       - 已通过审查的重构计划
@@ -180,21 +181,21 @@ steps:
       - 代码审查报告
       - 问题列表（如有）
 
-  - name: commit
-    description: 最终确认重构并创建拉取请求（PR 部分仅在走 PR 路径时执行）。
+  - name: delivery
+    description: 将已审查的 checkpoint 交付为 PR，并在合并及最终门禁通过后完成任务。
     recommended_agents:
       - claude
       - human
     tasks:
-      - 确保所有测试通过
-      - 编写清晰的提交信息说明重构内容
-      - 将任务移至已完成
+      - 验证当前 HEAD 仍等于已审查的 checkpoint
+      - 确认任务绑定的交付 remote 和目标分支仍有效
+      - 在 PR 合并及最终门禁通过后将任务移至已完成
     pr_tasks:
       - 创建包含详细变更描述的拉取请求
       - 将 PR 关联到相关 Issue
     inputs:
-      - 最终重构分支
+      - 已审查的本地 checkpoint
       - 任务文件
     outputs:
-      - 已完成的任务文件（位于 .agents/workspace/completed/）
       - 拉取请求（仅走 PR 路径时）
+      - 已完成的任务文件（PR 合并和最终门禁通过后）

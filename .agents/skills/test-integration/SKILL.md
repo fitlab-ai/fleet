@@ -51,18 +51,19 @@ go test -race ./...
 
 测试通过后，建议提交变更：
 
-> **重要**：以下「下一步」中列出的所有 TUI 命令格式必须完整输出，不要只展示当前 AI 代理对应的格式。如果 `.agents/.airc.json` 中配置了自定义 TUI（`customTUIs`），读取每个工具的 `name` 和 `invoke`，按同样格式补充对应命令行（`${skillName}` 替换为技能名，`${projectName}` 替换为项目名）。
+> 渲染下一步前先读取 `.agents/rules/next-step-output.md`，仅为已选场景调用统一 helper，并将 stdout 填入 `{next-step-commands}`。
+
+使用 `agent-infra-internal agent-client next-steps --skill commit` 生成本场景的 `{next-step-commands}`。
 
 ```
 下一步 - 提交代码：
-  - Claude Code / OpenCode：/commit
-  - Gemini CLI：/fleet:commit
-  - Codex CLI：$commit
+{next-step-commands}
 ```
 
 ## 注意事项
 
-1. **前置条件**：必须先成功构建 Fleet CLI
+1. **前置条件**：必须先成功构建 Fleet CLI；构建失败时先执行 test 技能排查
 2. **技术栈**：只执行 Go 构建和 Go 测试命令
-3. **兼容性矩阵**：`tests/compat` 是迁移兼容性验证入口
-4. **清理**：测试完成后不要提交 `dist/fleet`
+3. **兼容性矩阵**：`tests/compat` 是迁移兼容性验证入口，不得直接执行遗留测试源文件
+4. **超时**：竞态与兼容性测试可能耗时较长，请耐心等待
+5. **清理**：测试完成后不要提交 `dist/fleet`

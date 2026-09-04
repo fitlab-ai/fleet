@@ -27,7 +27,7 @@ git log --oneline -5
 |---|---|
 | `claude` | `Co-Authored-By: Claude <noreply@anthropic.com>` |
 | `codex` | `Co-Authored-By: Codex <noreply@openai.com>` |
-| `gemini` | `Co-Authored-By: Gemini <noreply@google.com>` |
+| `antigravity` | `Co-Authored-By: Antigravity <noreply@google.com>` |
 | `opencode` | `Co-Authored-By: OpenCode <noreply@opencode.ai>` |
 
 按以下规则构建 co-author 区块：
@@ -40,7 +40,7 @@ git log --oneline -5
 ## 创建提交
 
 ```bash
-agent-infra-internal git-workflow commit --input {commit-intent.json}
+agent-infra-internal git-workflow commit --input {commit-operation.json}
 ```
 
 重要约束：

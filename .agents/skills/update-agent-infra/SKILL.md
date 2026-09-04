@@ -43,7 +43,7 @@ node .agents/skills/update-agent-infra/scripts/sync-templates.js
 - `managed.conflicts`：来源未知、双边修改或平台切换时无法证明官方所有权的 guarded managed 冲突；必须逐项展示 target、reason 与三方哈希
 - `managed.removed`：被删除的 managed 文件（包括模板迁移时移除的旧路径）
 - `managed.skippedPlatform`：因归属其他平台而被跳过的 managed / merged 条目
-- `managed.skippedTUI`：因 `tuis` 中未启用对应内建 TUI 而被跳过的 managed / merged 条目（落在同一路径前缀下的 customTUI 命令文件会被保留）
+- `managed.skippedTUI`：因对应内建 Agent Client 的 `agentClients[].enabled` 为 `false` 而被跳过的 managed / merged 条目（落在同一路径前缀下的 customTUI 命令文件会被保留）
 - `merged.pending`：需要 AI 处理的 merged 文件列表
   - 每项包含 `target`（项目中的目标路径）和 `template`（模板根目录下的相对路径）
 - `registryAdded`：新增的文件注册条目
@@ -116,7 +116,7 @@ node .agents/skills/update-agent-infra/scripts/sync-templates.js
 
 > **原因**：本次执行使用的是旧版技能逻辑，新版技能可能包含额外的处理步骤。
 > 再次执行可确保新逻辑完整应用。
-> 用户也可以在执行前先运行 `ai update` 来预先更新技能文件，避免需要两次执行。
+> 用户也可以在执行前先运行 `ai sync` 来预先更新技能文件，避免需要两次执行。
 
 ### 输出报告
 
@@ -131,13 +131,13 @@ node .agents/skills/update-agent-infra/scripts/sync-templates.js
 
 如有变更需要提交，追加：
 
-> **重要**：以下「下一步」中列出的所有 TUI 命令格式必须完整输出，不要只展示当前 AI 代理对应的格式。如果 `.agents/.airc.json` 中配置了自定义 TUI（`customTUIs`），读取每个工具的 `name` 和 `invoke`，按同样格式补充对应命令行（`${skillName}` 替换为技能名，`${projectName}` 替换为项目名）。
+> 渲染下一步前先读取 `.agents/rules/next-step-output.md`，仅为已选场景调用统一 helper，并将 stdout 填入 `{next-step-commands}`。
+
+使用 `agent-infra-internal agent-client next-steps --skill commit` 生成本场景的 `{next-step-commands}`。
 
 ```
 下一步 - 提交代码：
-  - Claude Code / OpenCode：/commit
-  - Gemini CLI：/fleet:commit
-  - Codex CLI：$commit
+{next-step-commands}
 ```
 
 输出报告后**停止**，不要对项目做其他更改。

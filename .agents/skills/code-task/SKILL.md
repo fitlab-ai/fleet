@@ -7,15 +7,20 @@ description: >
 ---
 
 # 编码任务
+> `--agent` 取值见 `.agents/rules/task-management.md`「合作者 token 规范」。
+
+若入口业务操作数包含 `--orchestrated`，绑定 `{execution-flag}` = `--orchestrated` 并原样转发给 completed 事件；否则绑定为空。不得从 `orchestration.json`、环境变量或历史产物推断该标记。
 
 根据已批准的技术方案编码任务，并产出 `code.md` 或 `code-r{N}.md`。本技能支持初次实现、基于 `review-code` 反馈的修复，以及人工裁决驱动实现三种模式。
 
 ## 行为边界 / 关键规则
 
 - 严格遵循最新方案产物：`plan.md` 或 `plan-r{N}.md`
+- 生成会同步到 Issue 的任务或生命周期 Markdown 前，先读取 `.agents/rules/sync-content-generation.md` 并遵循其中的生成端约束；同步端不解析或改写正文
+- 实现前读取 `.agents/rules/compatibility-policy.md`；只实现方案明确批准的兼容预算，不以“稳妥”为由保留旧分支、旧结果契约或迁移 shim
 - 修复模式逐条核实最新 `review-code` 的发现：成立则修复，判定为不成立/幻觉则在报告中反驳并记入 unresolved；不擅自扩大到审查未列出的问题；manual-validation 项不在修复范围
-- 实现中遇到方案未覆盖的关键设计决策时，先调用 `agent-infra-internal task-ledger {task-id} decision-next-id` 取得 `HD-N`，按 `.agents/rules/human-decision-context.md` 写入实现报告的 `## 人工裁决待办` 详情块，再调用 `decision-upsert --id {HD-N} --stage code --artifact {code-artifact}`；不得扫描编号、手写账本行、中途提问或擅自扩范围
-- 绝不自动执行 `git add` 或 `git commit`
+- 实现中遇到方案未覆盖的关键设计决策时，先调用 `agent-infra-internal task-ledger {task-id} decision-next-id` 取得 `HD-N`，按 `.agents/rules/human-decision-context.md` 写入实现报告的 `## 人工裁决待办` 详情块并判断是否需要实现，再调用 `decision-upsert --id {HD-N} --stage code --artifact {code-artifact} --needs-implementation {true|false}`；不得扫描编号、手写账本行、中途提问或擅自扩范围
+- 不调用 `commit` 技能，也不推送远端；测试通过后直接调用共享 commit core 的 `delivery: { mode: 'local' }` 创建本地 checkpoint。checkpoint 使用 durable intent，只有 checkpoint 与 task 状态同步成功后才发送 `code.completed`
 - 每轮实现都创建新的实现产物，不覆盖旧文件
 - 执行本技能后，你**必须**立即更新 task.md
 
@@ -30,14 +35,15 @@ description: >
 | 「代码太简单，不需要测试」 | 简单代码也会回归；没有"失败→通过"的用例就没有完成标志，先写验证业务行为的测试。 |
 | 「先写代码再补测试更高效」 | 后补测试常沦为对实现的镜像；目标驱动应先定义可验证用例再让它通过。 |
 | 「方案这里不合理，顺手改更好」 | 偏离 `{plan-artifact}` 必须在报告中记录原因；有异议先停下确认，不擅自改方向。 |
-| 「测试过了，顺便提交一下」 | 本技能绝不执行 `git add`/`git commit`，提交是用户显式发起的独立步骤。 |
+| 「测试过了，顺便推送一下」 | 本技能只创建本地 checkpoint；远端推送是 `create-pr` 的唯一边界。 |
 | 「审查既然写了，照着改就行」 | 审查可能基于错误 `file:line` 或幻觉；动手前先 Read/Grep 核实，成立才修，不成立就反驳并记入 unresolved，不盲从。 |
+| 「保留旧入口更稳妥，反正只多一个分支」 | 未获批准的兼容是范围扩张和长期债务；没有对象、必要性、期限和退出条件就只实现当前契约。 |
 
 ## 第 0 步：状态核对（执行前硬约束）
 
 在加载 workflow / skill / rules 指令之后、做任何任务状态判断或用户可见结论之前，必须先执行状态核对。指令类文件读取不算对外动作或结论。
 
-运行以下命令，并把原文粘贴到回复正文和本轮产物的 `## 状态核对` 段：
+运行以下命令，并把原文粘贴到本轮产物的 `## 状态核对` 段：
 
 ```bash
 agent-infra-internal task-snapshot {task-id} --format text
@@ -47,13 +53,13 @@ agent-infra-internal task-snapshot {task-id} --format text
 
 ## 任务上下文解析
 
-> 入口允许省略 task ref，也接受旧位置 task ref 或 `--task <ref>` / `-t <ref>`。先从完整参数中分离 task scope 并原样保留其他业务操作数，再调用 `agent-infra-internal task-context resolve {task-scope}`；`{task-scope}` 为空、位置 ref 或 task flag 之一。只读取结构化结果的 `taskId`，后续把 `{task-id}` 绑定为该完整 `TASK-YYYYMMDD-HHMMSS`。解析失败时透传非零退出码，不自行扫描任务。
+> 入口可省略 task ref；显式 task scope 仅接受 `--task <ref>` 或 `-t <ref>`，不再解释位置 task ref。保留其余业务操作数后调用 `agent-infra-internal task-context resolve {task-scope}`；`{task-scope}` 为空或 task flag 之一。只读取结构化结果的 `taskId`，后续把 `{task-id}` 绑定为完整 `TASK-YYYYMMDD-HHMMSS`。解析失败时透传非零退出码，不自行扫描任务。
 
 > 解析任务引用，并确认任务位于本技能支持的状态或目录且存在 `task.md`；无法定位时按未找到任务处理并停止。
 
 ## 步骤开始：声明 started 事件
 
-确认前置条件与模式后、本轮第一个产出动作之前执行 `agent-infra-internal task-event {task-id} code.started --agent {agent}`。修复模式追加 `--fix-for {review-artifact}`，裁决模式追加 `--implementation-input {input-id}`。核心根据 artifact context 推导并校验轮次与输入身份；以返回的 `artifactContext` 记录本轮身份。
+确认前置条件与模式后、本轮第一个产出动作之前执行 `agent-infra-internal task-event {task-id} code.started --agent {standard-agent-token}`。修复模式追加 `--fix-for {review-artifact}`，裁决模式追加 `--implementation-input {input-id}`。核心根据 artifact context 推导并校验轮次与输入身份；以返回的 `artifactContext` 记录本轮身份。
 
 ## 执行步骤
 ### 1. 验证前置条件
@@ -79,7 +85,7 @@ agent-infra-internal task-snapshot {task-id} --format text
 
 ### 3. 收窄里程碑
 
-**必须执行，不得跳过。** 如果 task.md 中存在有效的 `issue_number`，调用 `agent-infra-internal platform-issue sync {task-id} --agent {agent} --milestone specific`；里程碑推断、权限降级与幂等写入由 internal core 处理。
+**必须执行，不得跳过。** 如果 task.md 中存在有效的 `issue_number`，调用 `agent-infra-internal platform-issue sync {task-id} --agent {standard-agent-token} --milestone specific`；里程碑推断、权限降级与幂等写入由 internal core 处理。
 
 > 若跳过或收窄后仍为 `X.Y.x`，步骤 11 的 `task-verify code.completed` 会通过 typed milestone check 截停本轮。
 
@@ -136,6 +142,8 @@ echo "$result"
 
 如果测试失败，先尝试修复并重新运行测试。只有在确认存在外部阻塞、环境缺失或需求不明确且超出任务范围时，才可以停止。
 
+测试通过后，通过 `agent-infra-internal git-workflow commit --input {checkpoint-input}` 调用共享 commit core，输入 `delivery: { "mode": "local" }`、明确 paths、expected HEAD/tree、task ref、agent 和 code round。该调用只创建本地 checkpoint，不访问远端；core 会在 commit 前写入 durable intent，并在 task writer 成功后清理 intent。checkpoint 失败或 task 状态未闭合时，不得发送 `code.completed`。
+
 排查测试失败或行为不符合预期时，先读取 `.agents/rules/debugging-guide.md`，按其四阶段流程定位根因，禁止盲目改代码重试。
 
 ### 9. 编写实现报告
@@ -150,14 +158,14 @@ echo "$result"
 - 审查 `## 需求` 段落，仅把本轮已由代码实现且有测试通过支撑的条目从 `- [ ]` 勾为 `- [x]`
 - 产物链接、阶段与完成日志由 completed 事件统一登记
 - 完成业务内容更新后声明完成事件：
-  - 初次实现：`agent-infra-internal task-event {task-id} code.completed --agent {agent} --artifact {code-artifact} --files-modified {n} --tests-passed {n}`
-  - 修复模式：`agent-infra-internal task-event {task-id} code.completed --agent {agent} --artifact {code-artifact} --fix-for {review-artifact} --blockers {n} --major {n} --minor {n} --manual-validation {n}`
-  - 裁决模式：`agent-infra-internal task-event {task-id} code.completed --agent {agent} --artifact {code-artifact} --implementation-input {input-id} --files-modified {n} --tests-passed {n}`
+  - 初次实现：`agent-infra-internal task-event {task-id} code.completed --agent {standard-agent-token} --artifact {code-artifact} --files-modified {n} --tests-passed {n} {execution-flag}`
+  - 修复模式：`agent-infra-internal task-event {task-id} code.completed --agent {standard-agent-token} --artifact {code-artifact} --fix-for {review-artifact} --blockers {n} --major {n} --minor {n} --manual-validation {n} {execution-flag}`
+  - 裁决模式：`agent-infra-internal task-event {task-id} code.completed --agent {standard-agent-token} --artifact {code-artifact} --implementation-input {input-id} --files-modified {n} --tests-passed {n} {execution-flag}`
 
 如果 task.md 中存在有效的 `issue_number`，执行以下同步操作（任一失败则记录 warning 并继续；Issue 元数据边界仍见 `.agents/rules/issue-sync.md`）：
-- 调用 `agent-infra-internal platform-issue sync {task-id} --agent {agent} --status in-progress`
-- 调用 `agent-infra-internal platform-comment sync {task-id} --kind task --agent {agent}`
-- 调用 `agent-infra-internal platform-comment sync {task-id} --kind artifact --artifact {code-artifact} --agent {agent}`
+- 调用 `agent-infra-internal platform-issue sync {task-id} --agent {standard-agent-token} --status in-progress`
+- 调用 `agent-infra-internal platform-comment sync {task-id} --kind task --agent {standard-agent-token}`
+- 调用 `agent-infra-internal platform-comment sync {task-id} --kind artifact --artifact {code-artifact} --agent {standard-agent-token}`
 
 ### 11. 完成校验
 
@@ -178,7 +186,7 @@ agent-infra-internal task-verify {task-id} code.completed --artifact {code-artif
 
 > 仅在校验通过后执行本步骤。
 
-> **重要**：以下「下一步」中列出的所有 TUI 命令格式必须完整输出，不要只展示当前 AI 代理对应的格式。如果 `.agents/.airc.json` 中配置了自定义 TUI（`customTUIs`），读取每个工具的 `name` 和 `invoke`，按同样格式补充对应命令行（`${skillName}` 替换为技能名，`${projectName}` 替换为项目名）。输出格式见 `reference/output-template.md`；修复模式输出见 `reference/fix-mode.md`。
+> 渲染下一步前先读取 `.agents/rules/next-step-output.md`，并按 `reference/output-template.md` 或 `reference/fix-mode.md` 的已选场景调用统一 helper。
 
 > 渲染最终输出前先读取 `.agents/rules/next-step-output.md` 并落实其两类规则：(1) 「下一步」命令的 `{task-ref}` 渲染为当前任务短号 `NN`（取值与回退见该文件），其他 `{task-id}` 占位（报告标题、路径）保持完整 TASK-id 形式；(2) 在面向用户输出的绝对最后一行追加 `Completed at` 收尾行（成功、错误、早退等任何面向用户输出都适用，不限于校验通过的成功态）。
 
@@ -188,11 +196,11 @@ agent-infra-internal task-verify {task-id} code.completed --artifact {code-artif
 - [ ] 已创建 `{code-artifact}`
 - [ ] 所有必需测试通过
 - [ ] 已更新 task.md 并追加 Activity Log
-- [ ] 已向用户展示所有 TUI 格式的下一步命令（含自定义 TUI）
+- [ ] 已通过统一 helper 渲染已选场景的下一步命令
 
 ## 停止
 
-完成检查清单后立即停止。不要自动提交。
+完成检查清单后立即停止。不要在本技能中推送远端、创建 PR 或调用 `commit` 技能。
 
 ## 注意事项
 

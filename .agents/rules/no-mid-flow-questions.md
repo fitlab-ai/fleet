@@ -39,6 +39,24 @@
 
 - `analyze-task`：任务描述/需求信息不足以支撑可靠分析时，可在入口处逐个提问收敛需求
 
+### 例外 4：当前快照的远端发布授权
+
+仅允许在当前会话已完成准备、已展示待发布的最新快照或精确内容后，询问一次是否执行对应远端发布。确认不跨会话、不跨快照复用；否定、调整、疑问、歧义或中断均 fail closed，不得写入远端。
+
+当前归入本例外的 SKILL：
+
+- `release`：展示最新 release snapshot 后确认是否 publish
+- `create-release-note`：展示 stage 后的精确 notes 与摘要后确认是否 publish
+- `post-release`：完成本地 post commit 并展示完整 `postConfirmation` 与摘要后确认是否普通 push
+
+### 例外 5：生命周期启动缺少完整模型策略
+
+仅当 `run-task` 在创建任何 run、baseline、receipt 或 child 之前收到核心错误 `ORCHESTRATION_MODEL_POLICY_REQUIRED` 时，可展示带完整性标签的模型选择上下文，并一次询问 executor/reviewer 的完整 model + reasoning effort。部分显式策略、缺少 client、active delegation 或其他暂停原因不适用；用户未回答时不得创建 run。
+
+当前归入本例外的 SKILL：
+
+- `run-task`：仅补齐核心明确要求的原子模型策略
+
 ## 禁言条款（默认行为）
 
 不属于上述任一例外的所有 SKILL 执行场景，遵循以下默认行为：
@@ -67,7 +85,7 @@
 - **小影响豁免**：若它只是局部、可逆、低成本的执行细节，写入 `## 假设` 即可，不升级为人工裁决。
 - **兜底**：无法判断是否关键时按关键处理；`review-*` 需要复核执行方是否漏标应升级的 `[needs-human-decision]`。
 
-> 用户可用 `ai task decisions <task-ref>` 查看某任务全部待裁决项及其详情块。
+> 用户可用 `ai task decisions [--task <ref> | -t <ref>]` 查看某任务全部待裁决项及其详情块。
 
 ## 人工审查检查点语义
 
@@ -77,6 +95,8 @@
 - **不是过程中暂停征求意见**：不允许在执行步骤之间插入「请问您倾向 A 还是 B？」之类的中断
 
 如果在执行过程中发现需要用户裁定的关键决策，按上文「关键设计决策标记与落账」处理：通过 `decision-next-id` / `decision-upsert` 结构化命令登记详情块与账本身份，由用户在审查检查点统一回应；普通未决问题仍写 `## 未决问题` / `Open Questions`。
+
+`run-task` 总控可以在子技能产出后依据核心机械状态继续到下一阶段；这不构成绕过人工裁决。只要核心返回人工裁决、人工验证或其他稳定暂停条件，总控必须停止，不能向用户中途提问，也不能自行批准。
 
 ## 锚点位置
 

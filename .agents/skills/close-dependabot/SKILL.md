@@ -6,6 +6,8 @@ description: >
 ---
 
 # 关闭 Dependabot 告警
+> `--agent` 取值见 `.agents/rules/task-management.md`「合作者 token 规范」。
+
 
 关闭指定的 Dependabot 安全告警并记录合理的关闭理由。
 
@@ -21,7 +23,7 @@ description: >
 
 ### 1. 获取告警信息
 
-执行前先读取 `.agents/rules/security-alerts.md`，并按其中的 Dependabot 告警读取命令获取告警详情。
+执行前先读取 `.agents/rules/security-alerts.md`，然后运行 `bash .agents/scripts/security-alerts.sh read-dependabot --number {alert-number}`，解析其 JSON 结果获取告警详情。
 
 验证告警处于 `open` 状态。如果已被关闭/修复，告知用户并退出。
 
@@ -75,7 +77,7 @@ CVE：{cve-id}
 
 ### 6. 执行关闭
 
-按 `.agents/rules/security-alerts.md` 中的 Dependabot 告警关闭命令执行关闭操作，并传入映射后的 `{api-reason}` 与用户说明。
+将用户说明写入 `{comment-file}`，然后运行 `bash .agents/scripts/security-alerts.sh dismiss-dependabot --number {alert-number} --reason {api-reason} --comment-file {comment-file}`。解析 JSON 结果，仅当关闭状态为 `applied` 或 `no-op` 时继续。
 
 **API reason 映射**：
 - 误报 -> `not_used` 或 `inaccurate`
@@ -89,7 +91,7 @@ CVE：{cve-id}
 如果有关联任务（搜索 `security_alert_number: <alert-number>`）：
 
 ```bash
-agent-infra-internal task-lifecycle {task-id} close-dependabot --agent {agent} \
+agent-infra-internal task-lifecycle {task-id} close-dependabot --agent {standard-agent-token} \
   --alert-number {alert-number} --reason "{reason}"
 ```
 
@@ -97,9 +99,11 @@ agent-infra-internal task-lifecycle {task-id} close-dependabot --agent {agent} \
 
 ### 8. 告知用户
 
-> **重要**：以下「下一步」中列出的所有 TUI 命令格式必须完整输出，不要只展示当前 AI 代理对应的格式。如果 `.agents/.airc.json` 中配置了自定义 TUI（`customTUIs`），读取每个工具的 `name` 和 `invoke`，按同样格式补充对应命令行（`${skillName}` 替换为技能名，`${projectName}` 替换为项目名）。 渲染最终输出前，先读取 `.agents/rules/next-step-output.md` 并落实其两类规则：(1) 「下一步」命令把 `{task-ref}` 渲染为短号 `NN`（未分配/已释放时回退完整 TASK-id）；(2) 在面向用户输出的绝对最后一行追加 `Completed at` 收尾行（成功、错误、早退等任何面向用户输出都适用，不限于校验通过的成功态）。
+> 渲染下一步前先读取 `.agents/rules/next-step-output.md`，仅为已选场景调用统一 helper，并将 stdout 填入 `{next-step-commands}`。
 
-> **可选沙箱清理提示（门控渲染）**：仅当同时满足 (1) `.agents/.airc.json` 存在 `sandbox` 字段、(2) 第 7 步按告警号定位到了关联任务、(3) 该关联任务 task.md 的 `branch` 字段存在且不是 `main` / `master` 时，才渲染下方输出中「注意：…」之后、「下一步」之前的「可选：清理本任务的沙箱」块；任一不满足则整段省略。`{branch}` 取第 7 步定位到的关联任务 task.md 的 `branch` 值。该块独立于「下一步」语义。
+> **可选沙箱清理提示（门控渲染）**：仅当同时满足 (1) `.agents/.airc.json` 存在 `sandbox` 字段、(2) 第 7 步按告警号定位到了关联任务、(3) 该任务 task.md 的 `branch` 存在且不是 `main` / `master`、(4) 任务状态与沙箱 workspace identity 已交叉校验且无冲突时，才渲染清理提示。状态和 identity 决定命令：仅 `completed` + `task-bound` 使用完整 `{task-id}`；仅在明确核对为 `branch-only` 时使用 `{branch}`；`active` 不渲染自动清理命令；`blocked` / `archive` 只渲染人工核对提示，不渲染命令。状态或 identity 缺失、冲突时整段省略；关闭告警本身不能推断任务已完成。该块独立于「下一步」语义。
+
+使用 `agent-infra-internal agent-client next-steps --skill complete-task --task-ref {task-ref}` 生成本场景的 `{next-step-commands}`。
 
 ```
 安全告警 #{alert-number} 已关闭。
@@ -114,14 +118,16 @@ agent-infra-internal task-lifecycle {task-id} close-dependabot --agent {agent} \
 注意：如有需要，可在平台侧重新打开。
 
 可选：清理本任务的沙箱
-（关联任务的沙箱容器和 per-branch 配置目录不会自动回收。如果不再需要可执行：）
+（仅在关联任务为 `completed` 且 identity 为 `task-bound` 时，使用完整任务 ID：）
+
+ai sandbox rm {task-id}
+
+（仅在明确核对 identity 为 `branch-only` 时，使用分支名：）
 
 ai sandbox rm {branch}
 
 下一步 - 完成并归档任务（如有关联任务）：
-  - Claude Code / OpenCode：/complete-task {task-ref}
-  - Gemini CLI：/fleet:complete-task {task-ref}
-  - Codex CLI：$complete-task {task-ref}
+{next-step-commands}
 ```
 
 ## 注意事项

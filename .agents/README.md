@@ -1,6 +1,6 @@
 # 多 AI 协作指南
 
-本项目支持多个 AI 编程助手协同工作，包括 Claude Code、OpenAI Codex CLI、Gemini CLI、OpenCode 等。
+本项目支持多个 AI 编程助手协同工作，包括 Claude Code、OpenAI Codex CLI、Antigravity CLI、OpenCode 等。
 
 ## 双配置架构
 
@@ -10,7 +10,7 @@
 |---------|---------|---------|
 | Claude Code | `.claude/`（CLAUDE.md、commands/、settings.json） | - |
 | OpenAI Codex CLI | `AGENTS.md` | - |
-| Gemini CLI | `AGENTS.md` | - |
+| Antigravity CLI | `AGENTS.md`、`.agents/skills/` | - |
 | OpenCode | `AGENTS.md` | - |
 | 其他 AI 工具 | `AGENTS.md` | 项目 README |
 
@@ -47,6 +47,11 @@
   settings.json                 # Claude 设置
 ```
 
+整个 `.agents/workspace/` 目录树都只保存运行时数据，并被 git ignore。`active/`
+保存当前任务，`blocked/` 保存暂停任务，`completed/` 保存已完成任务，`archive/`
+保存归档历史；运行时日志和过程证据也可能出现在该根目录下。不要在这里存放必须
+通过 Git 共享的内容；协作规则、模板和工作流应放在受版本控制的 `.agents/` 目录中。
+
 ## 协作模型
 
 多 AI 协作遵循结构化工作流：
@@ -75,7 +80,7 @@
 
 每个 AI 工具有不同的优势，请据此分配任务：
 
-| 能力 | Claude Code | Codex CLI | Gemini CLI | OpenCode |
+| 能力 | Claude Code | Codex CLI | Antigravity CLI | OpenCode |
 |-----|-------------|-----------|------------|----------|
 | 代码库分析 | 优秀 | 良好 | 优秀 | 良好 |
 | 代码审查 | 优秀 | 良好 | 良好 | 良好 |
@@ -88,7 +93,7 @@
 
 - **分析和审查** - Claude Code（推理能力强，探索全面）
 - **代码实现** - Codex CLI 或 OpenCode（代码生成快，命令式工作流顺手）
-- **大上下文任务** - Gemini CLI（大上下文窗口，适合跨文件分析）
+- **大上下文任务** - Antigravity CLI（大上下文窗口，适合跨文件分析）
 - **命令式迭代** - OpenCode（适合按工作流连续推进）
 
 ## 快速入门
@@ -117,7 +122,7 @@
 
 1. 在 `.agents/.airc.json` 中把 `platform.type` 设为稳定标识，例如 `my-platform`。
 2. 以 `.agents/rules/` 下已生成的规则文件为起点，改写为你的平台 CLI 或 API 调用，同时保持运行时文件名不变。
-3. 将这些自定义规则文件加入 `.agents/.airc.json` 的 `files.ejected`，避免后续执行 `agent-infra update` 时被覆盖。
+3. 将这些自定义规则文件加入 `.agents/.airc.json` 的 `files.ejected`，避免后续执行 `ai sync` 时被覆盖。
 4. 如果你维护的是模板源码分支或私有 fork，需要先补齐对应的 `.{platform}.` 模板变体，再把该平台标识加入模板同步逻辑。
 5. 在正式推广前，先用一个测试任务完整验证工作流和 gate 校验。
 
@@ -173,7 +178,7 @@ disable-model-invocation: true   # 可选；由支持该能力的 TUI 适配器�
 
 当生成的 TUI 命令需要禁用模型调用时，将通用可选字段 `disable-model-invocation` 设为 `true`；各 TUI 适配器按自身能力决定是否消费。多行 `description` 如需保留换行，使用 YAML literal block（`|`）；同步器会为各 TUI 输出对应的多行元数据格式。
 
-新增或修改自定义 skill 后，再执行一次 `update-agent-infra`。同步过程会自动检测非内置 skill，并为 Claude Code、Gemini CLI、OpenCode 生成对应命令。
+新增或修改自定义 skill 后，再执行一次 `update-agent-infra`。同步过程会自动检测非内置 skill，为 Claude Code 和 OpenCode 生成对应命令；Antigravity CLI 则直接发现共享 skill。
 
 ### 共享 skill 源
 
@@ -218,37 +223,43 @@ disable-model-invocation: true   # 可选；由支持该能力的 TUI 适配器�
 
 `ejected` 条目支持字面路径或 glob，匹配规则与 `merged` 相同。
 
-## 内建 TUI 选择
+## Agent Client 配置
 
-`.agents/.airc.json` 顶层 `tuis` 数组用于决定 agent-infra 应当为哪些内建 TUI（`claude-code`、`codex`、`gemini-cli`、`opencode`）安装并维护命令文件。
+`.agents/.airc.json` 顶层 `agentClients` 数组用于配置全部五个内建客户端（`claude-code`、`codex`、`antigravity-cli`、`opencode`、`traecli`）。每个规范条目包含三个必填字段和一个可选编排策略：
 
-| 取值 | 含义 |
+| 字段 | 含义 |
 |------|------|
-| `tuis` 缺失或为 `null` | 启用全部四个内建 TUI（向后兼容默认，适用于本字段引入之前的 `.airc.json`） |
-| `tuis: []` | 不维护任何内建 TUI。适用于只依赖 `customTUIs`、不需要安装任何内建命令文件的项目 |
-| `tuis: [<子集>]` | 仅维护列出的 TUI；未知 id 会被忽略 |
+| `id` | 内建 Agent Client id。规范数组为每个内建客户端保留且仅保留一个条目。 |
+| `enabled` | agent-infra 是否写入并维护该客户端的项目集成与种子命令。 |
+| `installInSandbox` | 沙箱镜像是否安装该客户端 CLI；此字段与 `enabled` 相互独立。 |
+| `orchestration` | `run-task` 可选默认策略；必须同时提供 executor/reviewer 的 `model` 与宿主原生 `reasoningEffort`，两个角色可以使用同一模型。 |
 
-`ai init` 会通过交互式多选询问该字段：
+`run-task` 的显式 model/effort 参数是原子输入：只要提供其中任一字段，就必须完整提供四个 role 字段，不能从配置补齐。完全没有显式策略时，只读取当前客户端的 `orchestration`。模型目录通过 `agent-infra-internal agent-client model-selection --client <id>` 查询，并明确标记 complete、partial 或 interactive-only；局部 override 列表不能当作完整目录。
 
-- 直接回车 = 接受默认值（全部内建 TUI 启用）。
-- 输入逗号分隔的编号或 id（如 `1,3` 或 `claude-code,opencode`）= 只保留子集。
-- 输入 `none` = 明确不启用任何内建 TUI（通常配合后续在 `customTUIs` 添加条目使用）。
-- 非法输入（重复、超界、未知 id、纯空白）会让 init 以非零退出码终止。
+无需手工编辑 JSON，可使用：
 
-### 取消某个 TUI 的副作用
+```bash
+ai agent-client list
+ai agent-client status
+ai agent-client enable codex
+ai agent-client disable antigravity-cli
+ai agent-client configure
+```
 
-通过 `ai init` 或手工编辑 `.airc.json` 取消某个内建 TUI 后，下一次 `ai update` / `update-agent-infra` 会：
+`enable` 和 `disable` 只修改 `enabled`；`configure` 同时编辑两个维度。`ai init` 会询问启用哪些客户端，直接回车会保留界面展示的默认值。所有客户端的 `installInSandbox` 默认均为 `true`。
 
-- 跳过该 TUI 的 seed 命令文件写入（例如 `.gemini/commands/<project>/update-agent-infra.toml`）；
-- 在回填 `files.managed` / `files.merged` 时跳过该 TUI owned 的默认条目；
-- **物理清理**该 TUI owned 路径前缀（`.claude/`、`.codex/`、`.gemini/`、`.opencode/`）下的已有文件——清理列表会出现在 `report.managed.removed`，与切换 `platform` 时的清理行为一致。
+TraeCode CLI 以 `.agents/skills/` 作为 Skill 的唯一权威源。agent-infra 仅在 `.traecli/commands/` 下生成轻量 slash-command 包装文件；每个包装文件读取对应的共享 Skill，并在该 Skill 声明参数时转发 `$ARGUMENTS`。它不会把 Skill 包镜像到 `.trae/skills/`；该目录继续由用户所有，仅用于有意添加的 Trae 专属覆盖。
 
-若希望保留某个具体文件，把它加入 `files.ejected`：被 ejected 的、属于已取消 TUI 的条目会保持原状，sync 不会重新创建也不会删除。
+`agentClients` 是内建客户端状态的唯一配置来源。顶层数组必须按固定规范顺序包含全部五个内建客户端；`sandbox.tools` 只列出 `agent-infra` 和自定义工具等非客户端工具。旧 `tuis` 字段或 `sandbox.tools` 中的内建客户端 id 会被拒绝，配置不会被自动改写。
+
+### 取消 Agent Client 的副作用
+
+取消某个内建客户端后，协调流程会停止维护其种子命令和 owned 注册项。未修改的生成种子文件可以被删除；本地修改过的种子文件会受到保护并进入报告。`files.ejected` 中的文件仍由项目所有并会被保留。
 
 ### 与其他配置字段的关系
 
-- `tuis` 控制 **agent-infra 写入与维护哪些 TUI 的命令文件**，与 `sandbox.tools`（控制**沙箱镜像里安装哪些 CLI**）相互独立。两者互不影响；`sandbox.tools` 的说明见 Sandbox 一节。
-- `tuis` 与 `customTUIs`（见下）相互独立。取消某个内建 TUI 时 customTUI 命令文件不会被清理，即便 customTUI 的 `dir` 落在该 TUI 的 owned 前缀下（例如 `dir: ".codex/commands"` 的 customTUI 在 `codex` 被取消时仍会保留）。
+- `sandbox.tools` 现在只列出 `agent-infra` 和自定义工具等非客户端工具。内建客户端的安装状态由 `agentClients[].installInSandbox` 表达。
+- `agentClients` 与 `customTUIs`（见下）相互独立。即使自定义 TUI 目录落在已取消的内建客户端路径前缀下，其命令文件也会被保留。
 
 ## 自定义 TUI 配置
 
@@ -300,7 +311,7 @@ disable-model-invocation: true   # 可选；由支持该能力的 TUI 适配器�
 
 ## 沙箱自定义工具（Sandbox Custom Tools）
 
-`customTUIs` 只负责生成 slash-command 文件，**不影响沙箱镜像**。如果要把一个非 npm 分发的 CLI 或工具（pip / cargo / curl 脚本 / 裸二进制）装进沙箱镜像、并 live-mount 它的凭证目录，需要在 `.agents/.airc.json` 的 `sandbox.customTools` 中声明。内建 sandbox 工具（`claude-code` / `codex` / `opencode` / `gemini-cli` / `agent-infra`）行为保持不变；其中 `agent-infra` 只提供沙箱内 `ai` / `agent-infra` CLI，不属于 `tuis` 或 `customTUIs` 配置。
+`customTUIs` 只负责生成 slash-command 文件，**不影响沙箱镜像**。如果要把一个非 npm 分发的 CLI 或工具（pip / cargo / curl 脚本 / 裸二进制）装进沙箱镜像、并 live-mount 它的凭证目录，需要在 `.agents/.airc.json` 的 `sandbox.customTools` 中声明。内建 Agent Client 按 `agentClients[].installInSandbox` 安装；`agent-infra` 仍是 `sandbox.tools` 中的非客户端条目，只提供沙箱内的 `ai` / `agent-infra` CLI。
 
 ### 必填字段
 

@@ -7,11 +7,16 @@ description: >
 ---
 
 # 分析任务
+> `--agent` 取值见 `.agents/rules/task-management.md`「合作者 token 规范」。
+
+若入口业务操作数包含 `--orchestrated`，绑定 `{execution-flag}` = `--orchestrated` 并原样转发给 completed 事件；否则绑定为空。不得从 `orchestration.json`、环境变量或历史产物推断该标记。
 
 ## 行为边界 / 关键规则
 
 - 本技能仅产出需求分析文档（`analysis.md` 或 `analysis-r{N}.md`）—— 不修改任何业务代码
 - 严格基于 `task.md` 中已有的任务输入、需求、上下文和来源信息展开分析
+- 生成会同步到 Issue 的任务或生命周期 Markdown 前，先读取 `.agents/rules/sync-content-generation.md` 并遵循其中的生成端约束；同步端不解析或改写正文
+- 涉及旧行为、旧数据、旧 schema 或旧调用方时，先读取 `.agents/rules/compatibility-policy.md`；没有兼容准入证据时明确采用 current-only，不把推测写成需求
 - 执行本技能后，你**必须**立即更新 task.md 中的任务状态
 
 版本戳规则：创建或更新 `task.md` frontmatter 时，先读取 `.agents/rules/version-stamp.md`，并写入或刷新 `agent_infra_version`。
@@ -20,7 +25,7 @@ description: >
 
 在加载 workflow / skill / rules 指令之后、做任何任务状态判断或用户可见结论之前，必须先执行状态核对。指令类文件读取不算对外动作或结论。
 
-运行以下命令，并把原文粘贴到回复正文和本轮产物的 `## 状态核对` 段：
+运行以下命令，并把原文粘贴到本轮产物的 `## 状态核对` 段：
 
 ```bash
 agent-infra-internal task-snapshot {task-id} --format text
@@ -30,7 +35,7 @@ agent-infra-internal task-snapshot {task-id} --format text
 
 ## 任务上下文解析
 
-> 入口允许省略 task ref，也接受旧位置 task ref 或 `--task <ref>` / `-t <ref>`。先从完整参数中分离 task scope 并原样保留其他业务操作数，再调用 `agent-infra-internal task-context resolve {task-scope}`；`{task-scope}` 为空、位置 ref 或 task flag 之一。只读取结构化结果的 `taskId`，后续把 `{task-id}` 绑定为该完整 `TASK-YYYYMMDD-HHMMSS`。解析失败时透传非零退出码，不自行扫描任务。
+> 入口可省略 task ref；显式 task scope 仅接受 `--task <ref>` 或 `-t <ref>`，不再解释位置 task ref。保留其余业务操作数后调用 `agent-infra-internal task-context resolve {task-scope}`；`{task-scope}` 为空或 task flag 之一。只读取结构化结果的 `taskId`，后续把 `{task-id}` 绑定为完整 `TASK-YYYYMMDD-HHMMSS`。解析失败时透传非零退出码，不自行扫描任务。
 
 > 解析任务引用，并确认任务位于本技能支持的状态或目录且存在 `task.md`；无法定位时按未找到任务处理并停止。
 
@@ -39,7 +44,7 @@ agent-infra-internal task-snapshot {task-id} --format text
 确认前置条件和轮次后、本轮第一个产出动作之前执行：
 
 ```bash
-agent-infra-internal task-event {task-id} analyze.started --agent {agent}
+agent-infra-internal task-event {task-id} analyze.started --agent {standard-agent-token}
 ```
 
 ## 执行步骤
@@ -106,8 +111,8 @@ agent-infra-internal task-event {task-id} analyze.started --agent {agent}
   1. 确定本轮要问的问题（与 4.2 保持一致）：
      - 若已存在 `pending_question`（上一问尚未得到答案）→ 复述该 `pending_question`，**不**修改它、**不**增加 `question_count`；
      - 否则（无待答问题）→ 选最高价值的一个问题（验收标准 > 范围 > 歧义），写入 `## Brainstorming`：`status: asking`、`pending_question: <问题>`、`question_count += 1`。
-  2. 若 `start_date` 为空，写入当日日期（`date +%F`）；随后执行 `agent-infra-internal task-event {task-id} analyze.awaiting-input --agent {agent} --question {question_count}`，由核心统一更新基础 frontmatter 和 Activity Log。
-  3. Issue 同步（存在 `issue_number` 时，任一失败跳过）：调用 `agent-infra-internal platform-comment sync {task-id} --kind task --agent {agent}` 更新 **task 评论**；`status` label 维持 `pending-design-work`；**不**发布分析产物评论。
+  2. 若 `start_date` 为空，写入当日日期（`date +%F`）；随后执行 `agent-infra-internal task-event {task-id} analyze.awaiting-input --agent {standard-agent-token} --question {question_count}`，由核心统一更新基础 frontmatter 和 Activity Log。
+  3. Issue 同步（存在 `issue_number` 时，任一失败跳过）：调用 `agent-infra-internal platform-comment sync {task-id} --kind task --agent {standard-agent-token}` 更新 **task 评论**；`status` label 维持 `pending-design-work`；**不**发布分析产物评论。
   4. 校验（替代步骤 8 的 artifact gate）：`agent-infra-internal task-verify {task-id} analyze.awaiting-input --format text`（早退已置 `current_step: requirement-analysis` 且已写入 `start_date`，预期通过）；并保留 `rg -n 'Analyze Task \(Brainstorming\)' .agents/workspace/active/{task-id}/task.md` 与 task 评论同步证据。**不**跑 artifact gate，也不跑 `check activity-log` / `check platform-sync`（二者绑定分析产物路径）。
   5. 用户输出：只展示当前**单个问题** + 如何回答/继续（再次触发 `analyze-task {task-ref}` 并附答案），并按 `.agents/rules/next-step-output.md` 在末行追加 `Completed at`。
   6. **STOP**，等待回答。下一次触发回到本步骤。
@@ -199,12 +204,12 @@ agent-infra-internal task-event {task-id} analyze.started --agent {agent}
   - 用新值覆盖 frontmatter 的 `priority` 字段
   - 在本轮分析产物 `{analysis-artifact}` 中追加 `## 优先级重估` 段，记录一条：`priority {old} → {new} (rationale: {基于本轮分析的简短依据})`
   若重估值与当前值一致，跳过：不写入 `## 优先级重估` 段。后续 Flow A 同步会读取可能更新过的 frontmatter，并自动把新值同步到 Issue。
-- 完成业务内容更新后执行 `agent-infra-internal task-event {task-id} analyze.completed --agent {agent} --artifact {analysis-artifact}`，由核心原子登记链接、阶段、代理、时间、版本和 Activity Log。
+- 完成业务内容更新后执行 `agent-infra-internal task-event {task-id} analyze.completed --agent {standard-agent-token} --artifact {analysis-artifact} {execution-flag}`，由核心原子登记链接、阶段、代理、时间、版本和 Activity Log。
 
 如果 task.md 中存在有效的 `issue_number`，执行以下同步操作（任一失败则跳过并继续）：
-- 调用 `agent-infra-internal platform-issue sync {task-id} --agent {agent} --status pending-design-work --fields`
-- 调用 `agent-infra-internal platform-comment sync {task-id} --kind task --agent {agent}`
-- 调用 `agent-infra-internal platform-comment sync {task-id} --kind artifact --artifact {analysis-artifact} --agent {agent}`
+- 调用 `agent-infra-internal platform-issue sync {task-id} --agent {standard-agent-token} --status pending-design-work --fields`
+- 调用 `agent-infra-internal platform-comment sync {task-id} --kind task --agent {standard-agent-token}`
+- 调用 `agent-infra-internal platform-comment sync {task-id} --kind artifact --artifact {analysis-artifact} --agent {standard-agent-token}`
 
 ### 8. 完成校验
 
@@ -229,9 +234,11 @@ agent-infra-internal task-verify {task-id} analyze.completed --artifact {analysi
 
 > 仅在校验通过后执行本步骤。
 
-> **重要**：以下「下一步」中列出的所有 TUI 命令格式必须完整输出，不要只展示当前 AI 代理对应的格式。如果 `.agents/.airc.json` 中配置了自定义 TUI（`customTUIs`），读取每个工具的 `name` 和 `invoke`，按同样格式补充对应命令行（`${skillName}` 替换为技能名，`${projectName}` 替换为项目名）。 渲染最终输出前，先读取 `.agents/rules/next-step-output.md` 并落实其两类规则：(1) 「下一步」命令把 `{task-ref}` 渲染为短号 `NN`（未分配/已释放时回退完整 TASK-id）；(2) 在面向用户输出的绝对最后一行追加 `Completed at` 收尾行（成功、错误、早退等任何面向用户输出都适用，不限于校验通过的成功态）。
+> 渲染下一步前先读取 `.agents/rules/next-step-output.md`，仅为已选场景调用统一 helper，并将 stdout 填入 `{next-step-commands}`。
 
 输出格式：
+使用 `agent-infra-internal agent-client next-steps --skill review-analysis --task-ref {task-ref}` 生成本场景的 `{next-step-commands}`。
+
 ```
 任务 {task-id} 分析完成。
 
@@ -244,9 +251,7 @@ agent-infra-internal task-verify {task-id} analyze.completed --artifact {analysi
 - 分析报告：.agents/workspace/active/{task-id}/{analysis-artifact}
 
 下一步 - 审查需求分析：
-  - Claude Code / OpenCode：/review-analysis {task-ref}
-  - Gemini CLI：/fleet:review-analysis {task-ref}
-  - Codex CLI：$review-analysis {task-ref}
+{next-step-commands}
 ```
 
 ## 完成检查清单
@@ -258,7 +263,7 @@ agent-infra-internal task-verify {task-id} analyze.completed --artifact {analysi
 - [ ] 更新了 task.md 中的 `assigned_to`
 - [ ] 追加了 Activity Log 条目到 task.md
 - [ ] 在工作流进度中标记了 requirement-analysis 为已完成
-- [ ] 告知了用户下一步（必须展示所有 TUI 的命令格式，含自定义 TUI，不要筛选）
+- [ ] 已通过统一 helper 渲染已选场景的下一步命令
 - [ ] **没有修改任何业务代码**
 
 ## 停止

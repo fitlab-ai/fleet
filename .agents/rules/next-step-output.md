@@ -20,6 +20,24 @@
 - **「任务信息」/「任务状态」结构化字段行** → 完整 ID 与短号同显：`- 任务 ID：{task-id}（短号 {task-ref}）`。
 - **报告标题**（`任务 {task-id} ... 完成`）与**产出文件路径**（`.agents/workspace/active/{task-id}/...`）→ 保持完整 `{task-id}`（物理路径与归档键，不可改）。
 
+## 统一客户端命令渲染
+
+下一步客户端命令必须由统一 helper 生成，skill 和输出模板不得自行拼接客户端命令表：
+
+```bash
+agent-infra-internal agent-client next-steps \
+  --skill {next-skill-name} \
+  [--task-ref {task-ref}] \
+  [--version {version}]
+```
+
+- 静态传入当前已选场景的下一 skill 名；只有命令需要任务引用时才传 `--task-ref`。
+- 只有版本化发布命令需要版本时才传 `--version`；值必须是以数字开头且 `semver.valid(raw) === raw` 的规范 SemVer。不得传 action、完整命令、shell 片段、空白或 `v` / `V` / `=` 前缀。
+- helper 只展示 `.agents/.airc.json` 中 `agentClients` 已启用的内建客户端，并在其后按配置顺序追加合法的 `customTUIs`。
+- 将非空 stdout 原样放入当前“下一步”标题后的 `{next-step-commands}`；stdout 为空时省略整个客户端命令块，但继续输出提醒、告警和 `Completed at`。
+- helper 写 stderr 或返回非零时，按当前 skill 的错误路径报告并停止；禁止回退到硬编码客户端表。
+- 复杂 skill 先选定唯一场景，再只为该场景调用一次 helper，不得提前渲染所有分支。
+
 ## 取短号（`{task-ref}`）
 
 短号唯一真源是注册表 `.agents/workspace/active/.short-ids.json`（经 `task-short-id.js`）。**禁止**读取 task.md frontmatter 的 `short_id` 字段（该字段不可信）。
@@ -92,11 +110,11 @@ Completed at: YYYY-MM-DD HH:mm:ss
   …（task.md `## 审查分歧账本` 中本阶段每个 status=needs-human-decision 行一条）
 
 查看详情：
-  - 全部待裁决项：ai task decisions {task-ref}
-  - 单项完整背景/选项/影响/建议：ai task decisions {task-ref} <序号|账本ID>
+  - 全部待裁决项：ai task decisions --task {task-ref}
+  - 单项完整背景/选项/影响/建议：ai task decisions --task {task-ref} --item <序号|账本ID>
 
 完成裁决：
-  - ai decide {task-ref} <序号|账本ID> <裁决内容与理由>
+  - ai decide --task {task-ref} --item <序号|账本ID> <裁决内容与理由>
 
 该命令原子写入 `HDR-N` 裁定记录、把目标账本行翻为 `human-decided`、更新 evidence 与活动日志；不要手工只修改其中一部分。
 

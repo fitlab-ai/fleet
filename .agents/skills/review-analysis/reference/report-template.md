@@ -5,7 +5,7 @@
 ## 输出模板
 
 ```markdown
-# 代码审查报告
+# 需求分析审查报告
 
 - **审查轮次**：第 {review-round} 轮
 - **产物文件**：`{review-artifact}`
@@ -22,7 +22,45 @@
 - **审查时间**：{timestamp}
 - **审查范围**：{file-count and major modules}
 - **总体结论**：{通过 / 需要修改 / 拒绝}
-- **发现（AI 可处理）**：0 阻塞项，0 主要，0 次要 / **人工校验**：0
+- **发现（AI 可处理）**：{unresolved-blockers} 阻塞项，{unresolved-major} 主要，{unresolved-minor} 次要 / **人工校验**：0
+
+## 检视覆盖声明
+
+| pass_id | scope | evidence | result | gaps_or_assumptions |
+|---------|-------|----------|--------|---------------------|
+| pass-1..5 | {本遍实际范围} | {artifact / file:line / command} | {发现或结论} | {缺口或假设} |
+
+| lens_id | trigger_evidence | loaded | result |
+|---------|------------------|--------|--------|
+| {registry token} | {命中或未命中证据} | {yes / no / not-applicable} | {专项结论} |
+
+## 需求分析专项覆盖
+
+| perspective_id | applicability | reviewed_scope | evidence | result_or_gap |
+|----------------|---------------|----------------|----------|---------------|
+| user | {applicable / not-applicable} | {业务目标、使用结果、非目标与验收} | {source_id / artifact / file:line} | {covered / gap} |
+| maintainer | {applicable / not-applicable} | {维护边界、依赖、兼容性与长期责任} | {source_id / artifact / file:line} | {covered / gap} |
+| operations | {applicable / not-applicable} | {部署、运行、可观测性、恢复与支持约束} | {source_id / artifact / file:line} | {covered / gap} |
+| security | {applicable / not-applicable} | {信任边界、权限、数据与滥用风险} | {source_id / artifact / file:line} | {covered / gap} |
+| testing | {applicable / not-applicable} | {输入、动作、结果、边界与验证环境} | {source_id / artifact / file:line} | {covered / gap} |
+
+| quality_id | source | stakeholder | priority_or_tradeoff | verification | result_or_gap |
+|------------|--------|-------------|----------------------|--------------|---------------|
+| {稳定标识} | {source_id} | {利益相关者} | {优先级或权衡状态} | {可观察验证方式} | {covered / gap} |
+
+| evolution_id | source | confirmation_status | classification | boundary_evidence | result_or_gap |
+|--------------|--------|---------------------|----------------|-------------------|---------------|
+| {稳定标识} | {source_id} | {confirmed / unconfirmed} | {design-input / assumption / open-question} | {不扩张为当前需求的证据} | {covered / gap} |
+
+| acceptance_id | observable_input | action | expected_result | status_or_gap |
+|---------------|------------------|--------|-----------------|---------------|
+| {稳定标识} | {可观察输入} | {审查或验证动作} | {预期结果} | {verifiable / open / gap} |
+
+## 追踪矩阵
+
+| source_id | upstream | reviewed_target | verification | status_or_gap |
+|-----------|----------|-----------------|--------------|---------------|
+| {来源标识} | {上游需求或事实} | {需求/验收/影响/风险} | {验证证据} | {covered / gap} |
 
 ## 问题清单
 
@@ -30,15 +68,23 @@
 
 #### 1. {问题标题}
 **文件**：`{file-path}:{line-number}`
-**说明**：{details}
-**修复建议**：{fix suggestion}
+**场景**：{scenario}
+**影响**：{impact}
+**证据**：{reproducible evidence}
+**置信度**：{high / medium / low}
+**未验证假设**：{assumptions or none}
+**修复方向**：{fix direction}
 
 ### 主要问题（建议修复）
 
 #### 1. {问题标题}
 **文件**：`{file-path}:{line-number}`
-**说明**：{details}
-**修复建议**：{fix suggestion}
+**场景**：{scenario}
+**影响**：{impact}
+**证据**：{reproducible evidence}
+**置信度**：{high / medium / low}
+**未验证假设**：{assumptions or none}
+**修复方向**：{fix direction}
 
 ### 次要问题（低影响但需闭环）
 

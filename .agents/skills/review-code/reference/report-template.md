@@ -21,11 +21,52 @@
 - **审查者**：{reviewer-name}
 - **审查时间**：{timestamp}
 - **审查范围**：{file-count and major modules}
-- **审查基线提交**：{本轮一次性捕获的 R 原文}（仅表示 diff base；详见 `.agents/rules/review-handshake.md`）
+- **审查目标提交**：{本轮一次性从任务绑定 remote/base 读取的目标分支 SHA M；不可被后续实时目标覆盖}
+- **审查已检视提交**：{本轮一次性捕获的本地 HEAD R；必须等于本轮 HEAD}
+- **审查基线提交**：{R 的兼容显示字段；必须与审查已检视提交相同}
+- **审查差异基线**：{用于完整 diff/fingerprint 的 D；必须等于 merge-base(R, saved M)}
 - **审查差异指纹**：{git-workflow snapshot 输出的 fingerprint 字段}
 - **审查快照树**：{git-workflow snapshot 输出的 tree 字段}
 - **总体结论**：{通过 / 需要修改 / 拒绝}（恰取一个；禁止写组合短语，否则 verify gate 失败）
-- **发现（AI 可处理）**：0 阻塞项，0 主要，0 次要 / **人工校验**：0
+- **发现（AI 可处理）**：{unresolved-blockers} 阻塞项，{unresolved-major} 主要，{unresolved-minor} 次要 / **人工校验**：0
+
+## 检视覆盖声明
+
+| pass_id | scope | evidence | result | gaps_or_assumptions |
+|---------|-------|----------|--------|---------------------|
+| pass-1..5 | {本遍实际范围} | {artifact / diff / file:line / command} | {发现或结论} | {缺口或假设} |
+
+| lens_id | trigger_evidence | loaded | result |
+|---------|------------------|--------|--------|
+| {registry token} | {命中或未命中证据} | {yes / no / not-applicable} | {专项结论} |
+
+## 代码实现专项覆盖
+
+| context_id | changed_lines | related_context | uncovered_area | result_or_gap |
+|------------|---------------|-----------------|----------------|---------------|
+| {file/module} | {changed line ranges} | {callers/callees/state/data flow} | {not reviewed or none} | {result / gap} |
+
+| quality_id | applicability | evidence | result_or_gap |
+|------------|---------------|----------|---------------|
+| responsibility | {applicable / not-applicable} | {code or call evidence} | {result / gap} |
+| cohesion | {applicable / not-applicable} | {code or call evidence} | {result / gap} |
+| coupling | {applicable / not-applicable} | {dependency evidence} | {result / gap} |
+| dependency-direction | {applicable / not-applicable} | {dependency evidence} | {result / gap} |
+| abstraction-fit | {applicable / not-applicable} | {variation evidence} | {result / gap} |
+| pattern-cost | {applicable / not-applicable} | {problem, conditions, cost, simpler alternative} | {result / gap} |
+| change-locality | {applicable / not-applicable} | {change propagation evidence} | {result / gap} |
+| testability | {applicable / not-applicable} | {test seam or behavior evidence} | {result / gap} |
+| architecture-boundary | {applicable / not-applicable} | {approved plan boundary} | {result / gap} |
+
+| acceptance_id | plan_source | implementation_location | test_or_validation_evidence | status_or_gap |
+|---------------|-------------|-------------------------|-----------------------------|---------------|
+| {acceptance token} | {approved requirement/plan} | {file:line or diff} | {automated test / manual-validation / explicit gap} | {covered / gap} |
+
+## 追踪矩阵
+
+| source_id | upstream | reviewed_target | verification | status_or_gap |
+|-----------|----------|-----------------|--------------|---------------|
+| {需求/方案步骤} | {已批准需求或设计} | {代码 diff} | {自动化测试或人工校验} | {covered / gap} |
 
 ## 问题清单
 
@@ -33,15 +74,23 @@
 
 #### 1. {问题标题}
 **文件**：`{file-path}:{line-number}`
-**说明**：{details}
-**修复建议**：{fix suggestion}
+**场景**：{scenario}
+**影响**：{impact}
+**证据**：{evidence_type: test / call-chain / state-transition / data-flow / specification-conflict / file-location} — {reproducible evidence}
+**置信度**：{high / medium / low}
+**未验证假设**：{assumptions or none}
+**修复方向**：{fix direction}
 
 ### 主要问题（建议修复）
 
 #### 1. {问题标题}
 **文件**：`{file-path}:{line-number}`
-**说明**：{details}
-**修复建议**：{fix suggestion}
+**场景**：{scenario}
+**影响**：{impact}
+**证据**：{evidence_type: test / call-chain / state-transition / data-flow / specification-conflict / file-location} — {reproducible evidence}
+**置信度**：{high / medium / low}
+**未验证假设**：{assumptions or none}
+**修复方向**：{fix direction}
 
 ### 次要问题（低影响但需闭环）
 
@@ -75,7 +124,7 @@
 
 ## 证据原文
 
-> 每条“我验证了 X”断言都要配对对应 tool output 原文；gate 仅校验本段存在和至少一行 `$ `。每条 Blocker 必须配可复现命令（rg/grep/sed/nl）及其原文；无法复现的判断须降级或移入「自我质疑」。
+> 每条“我验证了 X”断言都要配对对应 tool output 原文；gate 仅校验本段存在和至少一行 `$ `。每条 Blocker 必须配可复现的测试、调用链、状态转换、数据流、规范冲突或准确位置证据；无法复现的判断须降级或移入「自我质疑」。
 
 - 断言：{verified claim}
 ```text

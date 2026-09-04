@@ -12,8 +12,12 @@ effort:                         # 可选 Issue 字段：High | Medium | Low
 start_date:                     # Feature 可选 Issue 字段：YYYY-MM-DD
 target_date:                    # Feature 可选 Issue 字段：YYYY-MM-DD
 current_step: requirement-analysis # requirement-analysis | requirement-analysis-review | technical-design | technical-design-review | code | code-review | completed
-assigned_to:                   # claude | codex | gemini | opencode | human
-pr_status: pending             # PR 状态：pending（默认）| created（已创建 PR）| skipped（显式跳过）
+assigned_to:                   # claude | codex | antigravity | opencode | human
+pr_delivery_fact: '{"version":1,"state":"unbound","reason":"initial"}'
+delivery_remote: origin        # 任务分支交付使用的 Git remote
+delivery_base_ref: main        # 任务 PR 的目标分支
+checkpoint_commit:             # 最近一次本地 checkpoint commit
+delivery_remote_head:          # 最近一次成功交付到 remote 的任务分支 SHA
 ---
 
 # 任务：[标题]
@@ -80,7 +84,7 @@ pr_status: pending             # PR 状态：pending（默认）| created（已�
 
 ## 人工裁决
 
-<!-- 使用 ai decide <task-ref> <序号|账本ID> [--needs-implementation true|false] <裁决内容> 写入 needs-human-decision 裁定；code 阶段必须显式声明是否需要实现。 -->
+<!-- 使用 ai decide [--task <ref> | -t <ref>] (--item <序号|账本ID> | -i <序号|账本ID>) [--needs-implementation true|false] <裁决内容> 写入 needs-human-decision 裁定；新建 code 裁决的实现意图由上游 AI 预先声明，显式参数仅用于历史任务兼容或一致性复核。 -->
 
 ## 实现输入
 

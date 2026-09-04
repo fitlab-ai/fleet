@@ -23,35 +23,38 @@
 - 对无法确认的信息直接下结论，没有标记假设或开放问题
 - 凭印象或记忆断言 `file:line`/行为，没有用 rg/nl 复核就下结论
 
-## 通用审查原则
+## 需求分析专项覆盖
 
-1. **严格但公正**：既要指出问题，也要承认做得好的部分
-2. **具体**：引用准确的文件路径和行号
-3. **可执行**：给出明确可落地的修复建议
-4. **按严重程度分类**：明确区分 blocker、major 和 minor
+### 角色视角
 
-## 三类审查项决策树
+每轮必须逐项检视以下最低视角，并在报告中使用稳定的 `perspective_id`：
 
-1. 若问题揭示当前需求分析缺少需求、约束、风险、影响范围或可验证验收标准，登记为正式 finding，并按影响赋予 blocker / major / minor；severity 只表示影响大小，minor 也必须闭环。
-2. 若没有已知缺陷，但只能依赖真实环境、权限或人工操作完成验证，归为 manual-validation。
-3. 仅当建议属于未来优化且不影响当前分析的完整性、正确性和验收时，归为 advisory。advisory 只写入「非阻塞建议」，不进入账本、问题计数或 verdict。
+- `user`：业务目标、使用结果、非目标和验收
+- `maintainer`：维护边界、依赖、兼容性和长期责任
+- `operations`：部署、运行、可观测性、恢复和支持约束
+- `security`：信任边界、权限、数据和滥用风险
+- `testing`：可观察的输入、动作、结果、边界条件和验证环境
 
-## 人工校验项分类
+适用视角记录实际范围、证据和 `covered/gap`；`not-applicable` 必须附可复核依据，否则视为 gap。若任务来源或风险证据出现其他利益相关者，追加稳定 token；不要把可能角色扩张成固定全集。
 
-某些发现项是 AI agent 在本执行环境**无法闭环**的，例如：
+### 质量属性
 
-- 缺 Docker / 沙箱而无法跑端到端验证
-- 缺特定 OS（macOS-only 行为）
-- 缺第三方账号 / OAuth
-- 缺特权操作（root、sudo、特殊网络）
+只记录由来源、约束或角色视角实际触发的质量属性，不使用固定名词全集。每项需有稳定 `quality_id`、来源与利益相关者、优先级或权衡状态、可验证表达及 `covered/gap`。缺少来源的候选项只能作为假设、开放问题或非阻塞建议，不能作为已确认需求。
 
-**分类决策树**：「AI agent 能否在不改环境的前提下独立闭环这一项？」
-- 是 -> blocker / major / minor 之一（按风险定档）
-- 否 -> **manual-validation**（人工校验元类目，不参与严重程度排序）
+### 演进场景
 
-manual-validation 项的去向：
-- 写入 review 报告独立段落「人工校验项」
-- 在 done note 中写入源字段 `Manual-validation: 1`；`ai task log` 归一化展示到 review 行
-- **不**进入 code-task 修复循环；维护者在 PR description 中以「待人工验证」清单形式承接
+合理未来变化需有稳定 `evolution_id`、来源、`confirmed/unconfirmed` 状态、`design-input/assumption/open-question` 分类、边界证据及 `covered/gap`。`unconfirmed` 场景不得升级为当前需求，也不得直接驱动架构或实现选择。
+
+### 验收标准
+
+逐项记录稳定 `acceptance_id`、可观察输入、审查动作、预期结果和 `verifiable/open/gap`。非行为型约束可用可观察验证方式替代行为步骤；无法闭环时必须进入开放问题或 finding。
+
+### 追踪与边界
+
+共享追踪矩阵仍是来源到分析结论的唯一映射。其 `source_id` 应覆盖用户请求、Issue、任务事实/决策和验收标准；专项表通过来源或证据回指这些稳定标识。本阶段只判断分析是否足以进入设计，不选择架构风格、设计模式或实现技术，也不复制共享五遍协议和 finding 证据字段。
+
+## 共享方法与分类边界
+
+先读取 `.agents/rules/review-method.md`，按其五遍协议、风险镜头和 finding 证据契约执行；finding、manual-validation、advisory 与 `needs-human-decision` 的状态语义以 `.agents/rules/review-handshake.md` 为准。本文件只补充需求分析阶段的专项判断。
 
 同时检查最新需求分析产物和 `task.md` Activity Log，确保报告反映完整的分析上下文。

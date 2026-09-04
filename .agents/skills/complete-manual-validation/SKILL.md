@@ -7,12 +7,15 @@ description: >
 ---
 
 # 完成人工验证
+> `--agent` 取值见 `.agents/rules/task-management.md`「合作者 token 规范」。
+
 
 ## 行为边界 / 关键规则
 
 - 本技能用于收尾已有 PR 摘要评论中的人工校验状态，不创建并行的普通验证留言。
 - 必须写入 `manual-validation.md` 或 `manual-validation-r{N}.md`，让后续 PR 摘要刷新可复用人工验证结果。
 - 找不到 `sync-pr` 摘要评论时失败，不创建部分摘要兜底。
+- 生成会同步到 Issue 的人工验证 artifact Markdown 前，先读取 `.agents/rules/sync-content-generation.md` 并遵循其中的生成端约束；Issue 同步保持透明，不解析或改写正文。
 - 执行本技能后必须立即更新 `task.md`。
 
 版本戳规则：创建或更新 `task.md` frontmatter 时，先读取 `.agents/rules/version-stamp.md`，并写入或刷新 `agent_infra_version`。
@@ -21,7 +24,7 @@ description: >
 
 在加载 workflow / skill / rules 指令之后、做任何任务状态判断或用户可见结论之前，必须先执行状态核对。指令类文件读取不算对外动作或结论。
 
-运行以下命令，并把原文粘贴到回复正文和本轮产物的 `## 状态核对` 段：
+运行以下命令，并把原文粘贴到本轮产物的 `## 状态核对` 段：
 
 ```bash
 agent-infra-internal task-snapshot {task-id} --format text
@@ -29,13 +32,13 @@ agent-infra-internal task-snapshot {task-id} --format text
 
 ## 任务上下文解析
 
-> 入口允许省略 task ref，也接受旧位置 task ref 或 `--task <ref>` / `-t <ref>`。先从完整参数中分离 task scope 并原样保留其他业务操作数，再调用 `agent-infra-internal task-context resolve {task-scope}`；`{task-scope}` 为空、位置 ref 或 task flag 之一。只读取结构化结果的 `taskId`，后续把 `{task-id}` 绑定为该完整 `TASK-YYYYMMDD-HHMMSS`。解析失败时透传非零退出码，不自行扫描任务。
+> 入口可省略 task ref；显式 task scope 仅接受 `--task <ref>` 或 `-t <ref>`，不再解释位置 task ref。保留其余业务操作数后调用 `agent-infra-internal task-context resolve {task-scope}`；`{task-scope}` 为空或 task flag 之一。只读取结构化结果的 `taskId`，后续把 `{task-id}` 绑定为完整 `TASK-YYYYMMDD-HHMMSS`。解析失败时透传非零退出码，不自行扫描任务。
 
 > 解析任务引用，并确认任务位于本技能支持的状态或目录且存在 `task.md`；无法定位时按未找到任务处理并停止。
 
 ## 步骤开始：声明 started 事件
 
-确认前置条件和产物上下文后、本轮第一个产出动作之前执行 `agent-infra-internal task-event {task-id} manual-validation.started --agent {agent}`，并以返回的 `artifactContext` 记录本轮身份。
+确认前置条件和产物上下文后、本轮第一个产出动作之前执行 `agent-infra-internal task-event {task-id} manual-validation.started --agent {standard-agent-token}`，并以返回的 `artifactContext` 记录本轮身份。
 
 ## 执行步骤
 
@@ -44,10 +47,10 @@ agent-infra-internal task-snapshot {task-id} --format text
 输入格式：
 
 ```text
-complete-manual-validation {task-ref} [{pr-ref}] {verification-summary}
+complete-manual-validation [--task <ref> | -t <ref>] [{pr-ref}] {verification-summary}
 ```
 
-- `{task-ref}` 必填。
+- task scope 可省略；显式 scope 只接受 `--task <ref>` 或 `-t <ref>`。
 - `{pr-ref}` 可选，支持 `#NN`、`NN` 或完整 PR URL。
 - `{verification-summary}` 必填。若缺失，立即停止并提示补充验证说明；不写产物、不更新 PR。
 
@@ -55,7 +58,7 @@ complete-manual-validation {task-ref} [{pr-ref}] {verification-summary}
 
 检查：
 - `.agents/workspace/active/{task-id}/task.md`
-- 有效 PR：优先使用显式 `{pr-ref}`，否则读取 task.md frontmatter 的 `pr_number`
+- 有效 PR：优先使用显式 `{pr-ref}`，否则读取 task.md frontmatter 的 verified `pr_delivery_fact.identity.number`
 
 如果任务不存在、验证说明缺失，或无法解析有效 PR，立即停止。
 
@@ -83,9 +86,9 @@ complete-manual-validation {task-ref} [{pr-ref}] {verification-summary}
 
 ### 6. 更新 task.md
 
-执行 `agent-infra-internal task-event {task-id} manual-validation.completed --agent {agent} --artifact {manual-validation-artifact} --summary-result "{summary-result}"`，由核心在保持 `current_step` 不变的同时原子登记实现备注链接、时间/版本和完成日志。
+执行 `agent-infra-internal task-event {task-id} manual-validation.completed --agent {standard-agent-token} --artifact {manual-validation-artifact} --summary-result "{summary-result}"`，由核心在保持 `current_step` 不变的同时原子登记实现备注链接、时间/版本和完成日志。
 
-如任务存在有效 `issue_number`，调用 `agent-infra-internal platform-comment sync {task-id} --kind task --agent {agent}`，再调用 `agent-infra-internal platform-comment sync {task-id} --kind artifact --artifact {manual-validation-artifact} --agent {agent}`。
+如任务存在有效 `issue_number`，调用 `agent-infra-internal platform-comment sync {task-id} --kind task --agent {standard-agent-token}`，再调用 `agent-infra-internal platform-comment sync {task-id} --kind artifact --artifact {manual-validation-artifact} --agent {standard-agent-token}`。
 
 ### 7. 完成校验
 
@@ -106,7 +109,7 @@ agent-infra-internal task-verify {task-id} manual-validation.completed --artifac
 - 产物路径
 - PR 摘要同步结果
 - 当次完成校验输出
-- 下一步建议：继续 `commit` / `create-pr` 或进入最终审查流程
+- 下一步建议：进入最终收尾流程，运行 /complete-task {task-ref}
 
 渲染最终输出前，先读取 `.agents/rules/next-step-output.md`，并在绝对最后一行追加 `Completed at: YYYY-MM-DD HH:mm:ss`。
 

@@ -1,9 +1,11 @@
 # Issue 字段
 
+> `--agent` 取值见 `.agents/rules/task-management.md`「合作者 token 规范」。
+
 Issue Type 与 pinned fields 统一由 `platform-issue` intent 动态读取组织 schema 并同步：
 
 ```bash
-agent-infra-internal platform-issue sync {task-id} --agent {agent} --issue-type --fields
+agent-infra-internal platform-issue sync {task-id} --agent {standard-agent-token} --issue-type --fields
 ```
 
 ## 支持字段

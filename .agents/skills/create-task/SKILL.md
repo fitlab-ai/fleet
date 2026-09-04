@@ -6,6 +6,8 @@ description: >
 ---
 
 # 创建任务
+> `--agent` 取值见 `.agents/rules/task-management.md`「合作者 token 规范」。
+
 
 ## 行为边界 / 关键规则
 
@@ -15,8 +17,9 @@ description: >
 - 不要执行需求分析；分析由 `analyze-task` 独立完成
 - 不要直接实现所描述的功能
 - 不要跳过工作流直接进入计划/实现阶段
-- 仅执行：解析描述 -> 创建任务文件 -> 更新任务状态 -> 按 `.agents/rules/create-issue.md` 级联尝试创建 Issue -> 告知用户下一步
+- 仅执行：解析描述 -> 一次性生成结构化 candidate -> 调用宿主 `task-create` 入口 -> 校验结果 -> 告知用户下一步
 - Issue 创建由 `.agents/rules/create-issue.md` 规则决定；自定义或空平台（未提供平台变体规则文件）时，规则会自然降级为 no-op
+- 生成会写入 `task.md` 并同步到 Issue 的 Markdown 前，先读取 `.agents/rules/sync-content-generation.md` 并遵循其中的生成端约束；宿主渲染和同步保持透明，不解析或改写正文
 
 用户的描述是一个**待办事项**，而不是**立即执行的指令**。
 
@@ -69,7 +72,7 @@ description: >
 - `bugfix` -> `bug-fix`
 - `refactor` -> `refactoring`
 
-### 2. 创建任务目录和文件
+### 2. 生成不可变 candidate
 
 获取当前时间戳：
 
@@ -77,14 +80,17 @@ description: >
 date +%Y%m%d-%H%M%S
 ```
 
-- 创建任务目录：`.agents/workspace/active/TASK-{yyyyMMdd-HHmmss}/`
-- 使用 `.agents/templates/task.md` 模板创建任务文件：`task.md`
-- 将步骤 1 捕获的结构化上下文写入 `## 任务输入`，确保任务文件脱离原会话后仍可理解
+- 生成随机 UUID v4 作为 `idempotencyKey`，并把步骤 1 的结果写入单个 JSON 文件。
+- candidate 必须符合宿主 `TaskCreateCandidateV1`：`version`、`idempotencyKey`、标准 `agent`、`title`、`type`、不带项目前缀的 `branchSlug`、`priority`、`effort`、`description` 和 `taskInput` 七类列表。
+- 首次提交前只写一次 candidate；等待终态期间不得重新运行 AI 推导或改写文件。超时重试必须复用同一文件，由客户端生成新的 outer request ID。
 
-**重要**：
-- 目录命名：`TASK-{yyyyMMdd-HHmmss}`（**必须**包含 `TASK-` 前缀）
-- 示例：`TASK-20260306-143022`
-- 任务 ID = 目录名
+调用统一入口：
+
+```bash
+agent-infra-internal task-create --input "$candidate_file"
+```
+
+宿主负责 TASK-id/时间戳/版本戳、workflow/branch 派生、模板渲染、原子持久化、短号、Issue 与 warning。技能不得自行 `mkdir`、复制任务模板、分配短号或直接调用平台子命令。
 
 任务元数据（task.md YAML front matter）：
 ```yaml
@@ -106,7 +112,7 @@ assigned_to: {当前 AI 代理}
 
 priority / effort 必填：由 AI 从任务标题与描述推断后填入（候选值见 `.agents/rules/issue-fields.md`；中文输入按本地化映射规范化）。start_date / target_date 创建时保持留空：`start_date` 由 analyze 阶段写入、`target_date` 由 complete 阶段写入；不要臆测日期。
 
-### 3. 更新任务状态
+### 3. 处理结构化结果
 
 获取当前时间：
 
@@ -114,43 +120,25 @@ priority / effort 必填：由 AI 从任务标题与描述推断后填入（候�
 date "+%Y-%m-%d %H:%M:%S%z" | sed 's/\([+-][0-9][0-9]\)\([0-9][0-9]\)$/\1:\2/'
 ```
 
-更新 `.agents/workspace/active/{task-id}/task.md`：
-- `current_step`：requirement-analysis
-- `assigned_to`：{当前 AI 代理}
-- `updated_at`：{当前时间}
-- `agent_infra_version`：按 `.agents/rules/version-stamp.md` 取值
-- `## 上下文` 中的 `- **分支**：`：更新为生成的分支名
-- **追加**到 `## Activity Log`（不要覆盖之前的记录）：
-  ```
-  - {YYYY-MM-DD HH:mm:ss±HH:MM} — **Create Task** by {agent} — Task created from description
-  ```
+- `applied` / `no-op`：从响应读取 task ID、短号与可选 Issue 身份；不得从目录扫描推断。
+- `degraded`：本地任务已经保留；展示响应中的 warning。
+- `blocked`：保留 candidate 文件，修复暂态问题后用同一文件重试。
+- `failed`：报告稳定错误码；幂等冲突时不得改写原 key 或原 candidate 后重试。
 
-### 4. 级联创建并同步 Issue
+### 4. 平台失败兼容说明
 
-在 task.md 落盘并记录 `Create Task` 后调用声明式 Issue intent；标题、正文、模板、身份校验、权限降级、幂等创建和 task.md 绑定均由 internal core 处理：
+平台级联由宿主服务完成。兼容的人工恢复命令仍由宿主 warning 指引，不在沙箱内执行：
 
 ```bash
-agent-infra-internal platform-issue create {task-id} --agent {agent}
-agent-infra-internal platform-issue sync {task-id} --agent {agent} --status waiting-for-triage --assignees current --milestone initial --issue-type --fields
+agent-infra-internal task-warning {task-id} add --step create-task --severity ACTION_REQUIRED --code ISSUE_CREATE_FAILED --target issue --message "{error_code}: {error_message}" --action "修复认证/网络/模板问题后手动重试 Issue 创建，或手动创建/找到 Issue 后写入 issue_number"
+agent-infra-internal platform-comment sync {task-id} --kind task --agent {standard-agent-token}
 ```
 
-处理结果：
-- intent 成功创建 Issue：`issue_number` 已由任务写入内核回写；调用 `agent-infra-internal platform-comment sync {task-id} --kind task --agent {agent}`
-- 规则失败（认证 / 网络 / 模板解析等）：不回滚 task.md；不追加额外 Activity Log；先调用 `agent-infra-internal task-warning {task-id} add --step create-task --severity ACTION_REQUIRED --code ISSUE_CREATE_FAILED --target issue --message "{error_code}: {error_message}" --action "修复认证/网络/模板问题后手动重试 Issue 创建，或手动创建/找到 Issue 后写入 issue_number"` 提交结构化 warning 意图（调用方不分配编号或写表格）；再按"场景 C：Issue 创建失败"输出
-- intent 为 no-op/degraded：按结构化 operations 继续可执行部分；自定义或空平台不创建评论且不阻塞工作流
-- task.md 已存在有效 `issue_number`：create intent 校验绑定后返回 no-op，不重复创建
+技能只消费宿主返回的 Issue identity、operations 与 warnings；不得重复发起平台写入。
 
 ### 5. 完成校验
 
-**先调用短号分配**（保证注册表 entry 已分配；完成校验阶段会读取）：
-
-```bash
-node .agents/scripts/task-short-id.js alloc "$task_id"
-```
-
-如失败（退出码非 0），按提示「归档若干任务」或「调高 task.shortIdLength」处理；不要继续执行后续步骤。
-
-运行完成校验，确认任务产物和同步状态符合规范：
+宿主 `task-create` 服务在返回前运行同一 typed 完成校验；技能从响应的 `task:verify` operation 取得当次结果。branch-only 不得尝试读取不可见的新任务。宿主直接诊断时可运行：
 
 ```bash
 agent-infra-internal task-verify {task-id} create-task.completed --format text
@@ -167,9 +155,11 @@ agent-infra-internal task-verify {task-id} create-task.completed --format text
 
 > 仅在校验通过后执行本步骤。
 
-> **重要**：以下「下一步」中列出的所有 TUI 命令格式必须完整输出，不要只展示当前 AI 代理对应的格式。如果 `.agents/.airc.json` 中配置了自定义 TUI（`customTUIs`），读取每个工具的 `name` 和 `invoke`，按同样格式补充对应命令行（`${skillName}` 替换为技能名，`${projectName}` 替换为项目名）。 渲染最终输出前，先读取 `.agents/rules/next-step-output.md` 并落实其两类规则：(1) 「下一步」命令把 `{task-ref}` 渲染为短号 `NN`（未分配/已释放时回退完整 TASK-id）；(2) 在面向用户输出的绝对最后一行追加 `Completed at` 收尾行（成功、错误、早退等任何面向用户输出都适用，不限于校验通过的成功态）。
+> 渲染下一步前先读取 `.agents/rules/next-step-output.md`，仅为已选场景调用统一 helper，并将 stdout 填入 `{next-step-commands}`。
 
 场景 A：已创建 Issue 时输出：
+使用 `agent-infra-internal agent-client next-steps --skill analyze-task --task-ref {task-ref}` 生成本场景的 `{next-step-commands}`。
+
 ```
 任务已创建，并已级联创建 Issue。
 
@@ -184,12 +174,12 @@ agent-infra-internal task-verify {task-id} create-task.completed --format text
 - 任务文件：.agents/workspace/active/{task-id}/task.md
 
 下一步 - 执行需求分析：
-  - Claude Code / OpenCode：/analyze-task {task-ref}
-  - Gemini CLI：/fleet:analyze-task {task-ref}
-  - Codex CLI：$analyze-task {task-ref}
+{next-step-commands}
 ```
 
 场景 B：未创建 Issue 时输出：
+使用 `agent-infra-internal agent-client next-steps --skill analyze-task --task-ref {task-ref}` 生成本场景的 `{next-step-commands}`。
+
 ```
 任务已创建。
 
@@ -203,12 +193,12 @@ agent-infra-internal task-verify {task-id} create-task.completed --format text
 - 任务文件：.agents/workspace/active/{task-id}/task.md
 
 下一步 - 执行需求分析：
-  - Claude Code / OpenCode：/analyze-task {task-ref}
-  - Gemini CLI：/fleet:analyze-task {task-ref}
-  - Codex CLI：$analyze-task {task-ref}
+{next-step-commands}
 ```
 
 场景 C：Issue 创建失败时输出：
+使用 `agent-infra-internal agent-client next-steps --skill analyze-task --task-ref {task-ref}` 生成本场景的 `{next-step-commands}`。
+
 ```
 任务已创建，但 Issue 级联创建失败。
 
@@ -227,9 +217,7 @@ Issue 创建失败：
 - 任务文件：.agents/workspace/active/{task-id}/task.md
 
 下一步 - 执行需求分析：
-  - Claude Code / OpenCode：/analyze-task {task-ref}
-  - Gemini CLI：/fleet:analyze-task {task-ref}
-  - Codex CLI：$analyze-task {task-ref}
+{next-step-commands}
 
 后续如需平台同步：修复认证/网络/模板问题后，可按 `.agents/rules/create-issue.md` 对当前任务手动执行一次 Issue 创建；或手动创建/查找 Issue，并把 `issue_number` 写入 task.md，后续技能会接管级联同步。
 
@@ -241,14 +229,12 @@ Issue 创建失败：
 
 ## 完成检查清单
 
-- [ ] 创建了任务文件 `.agents/workspace/active/{task-id}/task.md`
+- [ ] 只生成一次结构化 candidate 并调用 `agent-infra-internal task-create`
+- [ ] 宿主创建了任务文件 `.agents/workspace/active/{task-id}/task.md`
 - [ ] 已按 `reference/context-capture.md` 写入并复核 `## 任务输入` 的来源与状态语义
-- [ ] 更新了 task.md 中的 `current_step` 为 requirement-analysis
-- [ ] 更新了 task.md 中的 `updated_at` 为当前时间
-- [ ] 更新了 task.md 中的 `assigned_to`
-- [ ] 追加了 Activity Log 条目到 task.md
+- [ ] 响应中的任务 ID 和短号已通过完成校验
 - [ ] 已按 `.agents/rules/create-issue.md` 尝试级联创建 Issue；失败时保留 task.md 并记录原因
-- [ ] 告知了用户下一步（必须展示所有 TUI 的命令格式，含自定义 TUI，不要筛选）
+- [ ] 已通过统一 helper 渲染已选场景的下一步命令
 - [ ] **没有修改任何业务代码或配置文件**
 
 ## 停止

@@ -1,5 +1,7 @@
 # Issue 同步规则
 
+> `--agent` 取值见 `.agents/rules/task-management.md`「合作者 token 规范」。
+
 ## Marker 注册表
 
 以下 key 及格式是 Issue 评论身份的兼容契约；调用方只传 key/资源，不自行拼 marker。
@@ -14,16 +16,18 @@
 
 `prSummary` 属于 `.agents/rules/pr-sync.md`，本规则不实现 PR 聚合。
 
+`pr-review` 原文只通过 `artifact` / `artifactChunk` marker 同步为 Issue artifact 评论，不作为 `restore-task` 恢复来源；恢复仍只接受 Issue 编号并只读注册的 Issue marker，不新增 PR 来源。
+
 ## 平台 intent
 
-GitHub upstream、认证、capability、分页、marker 查找、幂等 create/update、分片、重试与错误分类由 typed platform core 统一处理：
+平台 upstream、认证、capability、分页、marker 查找、幂等 create/update、分片、重试与错误分类由 typed platform core 统一处理：
 
 ```bash
 agent-infra-internal platform-context resolve [--cwd <path>]
 agent-infra-internal platform-comment list --issue <N> [--cwd <path>]
 agent-infra-internal platform-comment owner <task-ref>
 agent-infra-internal platform-comment sync <task-ref> \
-  --kind task|artifact|summary|cancel --agent <agent> \
+  --kind task|artifact|summary|cancel --agent {standard-agent-token} \
   [--artifact <canonical.md>] [--body-file <path|->] [--backfill]
 ```
 
@@ -54,12 +58,12 @@ agent-infra-internal task-warning {task-id} add \
 
 ```bash
 agent-infra-internal platform-issue inspect {task-id}
-agent-infra-internal platform-issue create {task-id} --agent {agent}
-agent-infra-internal platform-issue bind {task-id} --issue {number} --agent {agent}
-agent-infra-internal platform-issue sync {task-id} --agent {agent} {desired-state-flags}
+agent-infra-internal platform-issue create {task-id} --agent {standard-agent-token}
+agent-infra-internal platform-issue bind {task-id} --issue {number} --agent {standard-agent-token}
+agent-infra-internal platform-issue sync {task-id} --agent {standard-agent-token} {desired-state-flags}
 ```
 
-`sync` 支持 status/in labels、assignee、milestone、Issue Type、pinned fields、需求复选框与 Issue state。省略 flag 表示 preserve，`none` 表示显式清空。适配层统一处理集合差集、动态 schema、权限降级、dry-run、重试、错误分类与幂等重放；SKILL 不得拼装 `gh issue`、GraphQL 或权限分支。
+`sync` 支持 status/in labels、assignee、milestone、Issue Type、pinned fields、需求复选框与 Issue state。省略 flag 表示 preserve，`none` 表示显式清空。适配层统一处理集合差集、动态 schema、权限降级、dry-run、重试、错误分类与幂等重放；SKILL 不得拼装平台 CLI、GraphQL 或权限分支。
 
 - `planned|applied|no-op|degraded` → exit 0
 - `failed` → exit 1

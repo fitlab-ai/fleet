@@ -13,10 +13,12 @@
 - [ ] 错误处理和边界情况
 - [ ] 性能与安全风险
 - [ ] 代码注释和文档
+  - [ ] 新增或修改的文档准确反映变更后的当前行为
+  - [ ] 文档变更由共享风险镜头注册表确定性路由到必读专项 reference
 - [ ] 与已批准技术方案的一致性
 - [ ] 已复核执行方是否漏标应升级为 `[needs-human-decision]` 的关键设计决策
 - [ ] 本轮所有 `needs-human-decision` 详情均符合 `.agents/rules/human-decision-context.md` 的自足结构
-- [ ] 每条 blocker 都配可复现的 grep/sed/nl 证据，未直接验证的结论已在「自我质疑」声明
+- [ ] 每条 blocker/major 都配与问题相称的语义证据，未直接验证的结论已在「自我质疑」声明
 
 **常见反例**：
 - 只检查测试是否通过，没有阅读实际 diff
@@ -24,35 +26,38 @@
 - 把环境缺失导致无法验证的事项误归类为 blocker
 - 凭印象或记忆断言 `file:line`/行为，没有用 rg/nl 复核就下结论
 
-## 通用审查原则
+## 共享方法与分类边界
 
-1. **严格但公正**：既要指出问题，也要承认做得好的部分
-2. **具体**：引用准确的文件路径和行号
-3. **可执行**：给出明确可落地的修复建议
-4. **按严重程度分类**：明确区分 blocker、major 和 minor
-
-## 三类审查项决策树
-
-1. 若问题揭示当前实现或测试存在正确性、完整性、安全性、性能或验收缺口，登记为正式 finding，并按影响赋予 blocker / major / minor；severity 只表示影响大小，minor 也必须闭环。
-2. 若没有已知缺陷，但只能依赖真实环境、权限或人工操作完成验证，归为 manual-validation。
-3. 仅当建议属于未来优化且不影响当前实现的完整性、正确性和验收时，归为 advisory。advisory 只写入「非阻塞建议」，不进入账本、问题计数或 verdict。
-
-## 人工校验项分类
-
-某些发现项是 AI agent 在本执行环境**无法闭环**的，例如：
-
-- 缺 Docker / 沙箱而无法跑端到端验证
-- 缺特定 OS（macOS-only 行为）
-- 缺第三方账号 / OAuth
-- 缺特权操作（root、sudo、特殊网络）
-
-**分类决策树**：「AI agent 能否在不改环境的前提下独立闭环这一项？」
-- 是 -> blocker / major / minor 之一（按风险定档）
-- 否 -> **manual-validation**（人工校验元类目，不参与严重程度排序）
-
-manual-validation 项的去向：
-- 写入 review 报告独立段落「人工校验项」
-- 在 done note 中写入源字段 `Manual-validation: 1`；`ai task log` 归一化展示到 review 行
-- **不**进入 code-task 修复循环；维护者在 PR description 中以「待人工验证」清单形式承接
+先读取 `.agents/rules/review-method.md`，按其五遍协议、风险镜头和 finding 证据契约执行；finding、manual-validation、advisory 与 `needs-human-decision` 的状态语义以 `.agents/rules/review-handshake.md` 为准。本文件只补充代码实现阶段的专项判断。
 
 同时检查 `git diff`、最新实现产物、最新技术方案审查产物和 `task.md` Activity Log，确保报告反映完整的变更上下文。
+
+## 代码阶段五遍动作
+
+| pass_id | code-stage action |
+|---------|-------------------|
+| pass-1 | 读取完整 diff、未跟踪文件、实现/方案产物、任务来源和测试原始结果 |
+| pass-2 | 建立验收/方案—实现—验证映射，并记录 changed lines、调用上下文、状态/数据流和未覆盖区域 |
+| pass-3 | 先检查整体设计，再检查逐文件语义；判断共享注册表的每个触发器并完整加载命中 reference |
+| pass-4 | 检查保护条件、调用约束、测试覆盖和更窄影响范围等反证 |
+| pass-5 | 核对 finding、manual-validation、advisory、证据类型、未验证假设、账本和 verdict |
+
+逐行 diff 阅读不能替代必要的调用链、状态转换或数据流检查。
+
+## 结构设计镜头
+
+| quality_id | review focus |
+|------------|--------------|
+| responsibility | 单个模块或函数的职责边界是否清晰 |
+| cohesion | 同一单元内的行为和数据是否共同服务一个目的 |
+| coupling | 依赖数量、知识泄漏和跨模块协调成本是否合理 |
+| dependency-direction | 依赖是否指向已批准的稳定边界 |
+| abstraction-fit | 抽象是否匹配实际变化点，避免不足或过度抽象 |
+| pattern-cost | 模式解决的问题、适用条件、成本和更简单替代是否相称 |
+| change-locality | 同一业务变化是否能局部完成 |
+| testability | 关键行为和失败路径能否被可靠观察与控制 |
+| architecture-boundary | 实现是否遵守已批准架构，不在代码审查阶段首次重选重大架构 |
+
+## 证据类型
+
+blocker/major 可使用 `test`、`call-chain`、`state-transition`、`data-flow`、`specification-conflict` 或 `file-location`。命令和 `file:line` 是定位手段，不是唯一有效证据；证据必须能复现问题场景并解释影响。

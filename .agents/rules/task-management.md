@@ -19,6 +19,16 @@
 - 更新 `agent_infra_version` 前，先读取 `.agents/rules/version-stamp.md`
 - Activity Log 只能追加，不能覆盖历史记录
 
+## 合作者 token 规范
+
+`--agent` 取值必须收敛到标准 AI 合作者 token，禁止填入 OS 系统用户名（如 `devuser`）或 git 用户名（如 `季聿阶`）。标准集合（短名为活动日志唯一事实来源）：
+
+- AI 短名：`claude` / `codex` / `antigravity` / `opencode` / `cursor` / `traecli`
+- 长名映射（写入前归一化为短名）：`claude-code` → `claude`、`antigravity-cli` → `antigravity`
+- 人工步骤例外：无论使用哪个 Agent，只要是人做的决定，统一声明 `human`
+
+七个内部命令（`task-event` / `task-lifecycle` / `task-finalization` / `platform-issue` / `platform-comment` / `platform-pr` / `task-orchestration`）对 `--agent` 做白名单硬校验：接受短名、长名或 `human`，非标准值返回对应 `*_PAYLOAD_INVALID` 错误；长名在落库/透传前归一化为短名。渲染端 `ai task log` 对无法识别的 token 保留 `human` 归类并附加 `(unknown)` 标记。
+
 ## 状态快照与完成验证入口
 
 - 运行时 SKILL 需要记录 git、任务目录和 task.md tail 证据时，统一调用 `agent-infra-internal task-snapshot {task-id} --format text`；不得自行解析短号、扫描 workspace 或重新拼接三段状态命令。
@@ -39,7 +49,7 @@
 - `review-plan`：更新 `current_step`、`updated_at`、`agent_infra_version`
 - `code-task`：更新 `current_step`、`updated_at`、`agent_infra_version`
 - `review-code`：更新 `current_step`、`updated_at`、`agent_infra_version`
-- `create-pr`：更新 `pr_number`、`updated_at`、`agent_infra_version`
+- `create-pr`：通过 `pr_delivery_fact` writer 更新 PR 绑定事实、`updated_at`、`agent_infra_version`
 - `commit`：更新 `updated_at`、`agent_infra_version`；必要时更新 `current_step`（详见 `commit/reference/task-status-update.md`）
 - `complete-task`：更新 `status`、`current_step`、`completed_at`、`updated_at`、`agent_infra_version`
 - `block-task`：更新 `status`、`blocked_at`、`updated_at`、`agent_infra_version`
@@ -59,6 +69,7 @@
   `- {time} — **{基名} [started]** by {agent} — started`
 - **done 行**（步骤完成时写，与现状一致）：action 即基名本身：
   `- {time} — **{基名}** by {agent} — {完成说明}`
+- **Commit 执行边界**：commit 技能不得手写 task Activity Log、review anchor、receipt 或 checkpoint。task-bound direct 与 orchestrated 都调用唯一 `commit-operation.execute`；taskless direct 只在 `TASK_CONTEXT_NOT_FOUND` 时允许，且不产生任务状态副作用。
 - `{基名}` 指该 SKILL 既有 done 条目的 action 文本，含 `(Round {N})`（如 `Plan Task (Round 1)`）。
   started 与 done 共用同一 `{基名}` 才能配对。
 
@@ -74,5 +85,7 @@
   `analyze-task`、`plan-task`、`code-task`、`review-analysis`、`review-plan`、`review-code`、`commit`、`complete-task`、`create-pr`、`watch-pr`、`block-task`、`cancel-task`、`restore-task`、`close-codescan`、`close-dependabot`。
 - **延迟补写（本技能创建 task.md，开始时无文件可写）**——开始执行前先在内存记录 `started_at`，最后写活动日志时**一次性补两条**（started 行用 `started_at`、done 行用完成时间）：
   `create-task`、`import-issue`、`import-codescan`、`import-dependabot`。
+
+- **宿主解析后写入**——`review-pr` 只有在唯一任务宿主、canonical round 与被审 head 确定后才通过 `task-activity pr-review-start` 写 started；成功以 `pr-review-complete` 闭合，已知未发布的受控失败或 head 漂移以 `pr-review-terminate` 写 `aborted` / `superseded` 终态。同一 task/round/head/terminal payload 重放为 no-op；一次性检视不写任务日志。
 
 **例外**：`check-task` 等只读巡检类、不代表实质工作推进的技能不写 started。无 task.md 上下文的纯操作（如无关联任务的 `commit`）同样跳过。

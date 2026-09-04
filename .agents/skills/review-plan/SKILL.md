@@ -7,12 +7,16 @@ description: >
 ---
 
 # 技术方案审查
+> `--agent` 取值见 `.agents/rules/task-management.md`「合作者 token 规范」。
+
+若入口业务操作数包含 `--orchestrated`，绑定 `{execution-flag}` = `--orchestrated` 并原样转发给 summary finalizer 与 completed 事件；否则绑定为空。不得从 `orchestration.json`、环境变量或历史产物推断该标记。
 
 审查最新技术方案产物，并产出 `review-plan.md` 或 `review-plan-r{N}.md`。
 
 ## 行为边界 / 关键规则
 
 - 本技能只审查方案产物并写报告，不修改业务代码
+- 生成会同步到 Issue 的任务或生命周期 Markdown 前，先读取 `.agents/rules/sync-content-generation.md` 并遵循其中的生成端约束；同步端不解析或改写正文
 - 执行本技能后，你**必须**立即更新 task.md
 
 版本戳规则：创建或更新 `task.md` frontmatter 时，先读取 `.agents/rules/version-stamp.md`，并写入或刷新 `agent_infra_version`。
@@ -21,7 +25,7 @@ description: >
 
 在加载 workflow / skill / rules 指令之后、做任何任务状态判断或用户可见结论之前，必须先执行状态核对。指令类文件读取不算对外动作或结论。
 
-运行以下命令，并把原文粘贴到回复正文和本轮产物的 `## 状态核对` 段：
+运行以下命令，并把原文粘贴到本轮产物的 `## 状态核对` 段：
 
 ```bash
 agent-infra-internal task-snapshot {task-id} --format text
@@ -31,13 +35,13 @@ agent-infra-internal task-snapshot {task-id} --format text
 
 ## 任务上下文解析
 
-> 入口允许省略 task ref，也接受旧位置 task ref 或 `--task <ref>` / `-t <ref>`。先从完整参数中分离 task scope 并原样保留其他业务操作数，再调用 `agent-infra-internal task-context resolve {task-scope}`；`{task-scope}` 为空、位置 ref 或 task flag 之一。只读取结构化结果的 `taskId`，后续把 `{task-id}` 绑定为该完整 `TASK-YYYYMMDD-HHMMSS`。解析失败时透传非零退出码，不自行扫描任务。
+> 入口可省略 task ref；显式 task scope 仅接受 `--task <ref>` 或 `-t <ref>`，不再解释位置 task ref。保留其余业务操作数后调用 `agent-infra-internal task-context resolve {task-scope}`；`{task-scope}` 为空或 task flag 之一。只读取结构化结果的 `taskId`，后续把 `{task-id}` 绑定为完整 `TASK-YYYYMMDD-HHMMSS`。解析失败时透传非零退出码，不自行扫描任务。
 
 > 解析任务引用，并确认任务位于本技能支持的状态或目录且存在 `task.md`；无法定位时按未找到任务处理并停止。
 
 ## 步骤开始：声明 started 事件
 
-确认前置条件和产物上下文后、本轮第一个产出动作之前执行 `agent-infra-internal task-event {task-id} review-plan.started --agent {agent}`。
+确认前置条件和产物上下文后、本轮第一个产出动作之前执行 `agent-infra-internal task-event {task-id} review-plan.started --agent {standard-agent-token}`。
 
 ## 执行步骤
 ### 1. 验证前置条件
@@ -58,6 +62,7 @@ agent-infra-internal task-snapshot {task-id} --format text
 
 重点检查方案的简洁性、可执行性、风险控制、测试策略、文件清单和阶段边界。
 
+> 共享检视方法见 `.agents/rules/review-method.md`。执行此步骤前先读取该规则，并按五遍协议完成覆盖声明、风险镜头判断、追踪矩阵和反证检视。
 > 详细审查标准见 `reference/review-criteria.md`。执行此步骤前先读取 `reference/review-criteria.md`。
 
 ### 5. 编写审查报告
@@ -68,11 +73,23 @@ agent-infra-internal task-snapshot {task-id} --format text
 
 ### 6. 更新任务状态
 
-报告完成后，新 finding 逐条调用 `agent-infra-internal task-ledger {task-id} finding-upsert --stage plan --review-artifact {review-artifact} --ordinal {n} --severity {blocker|major|minor} --evidence {review-artifact}#{anchor}`；复核上一轮响应时调用 `finding-review --id {ledger-id} --status {confirmed|closed|open|needs-human-decision} --evidence {相称证据}`。不得扫描编号或手写账本行。全部账本写入完成后只调用一次 `agent-infra-internal task-ledger {task-id} stage-status --stage plan`，以 `stageStatus.canAdvance` 决定 verdict 和下一步，并以 `unresolvedFindingCounts` 填写 blocker/major/minor：仅 `canAdvance=true` 可用 `approved`，否则必须用 `changes-requested` 或 `rejected`。随后执行 `agent-infra-internal task-event {task-id} review-plan.completed --agent {agent} --artifact {review-artifact} --verdict {approved|changes-requested|rejected} --blockers {n} --major {n} --minor {n} --manual-validation {n}`。
+报告完成后，新 finding 逐条调用 `agent-infra-internal task-ledger {task-id} finding-upsert --stage plan --review-artifact {review-artifact} --ordinal {n} --severity {blocker|major|minor} --evidence {review-artifact}#{anchor}`；复核上一轮响应时调用 `finding-review --id {ledger-id} --status {confirmed|closed|open|needs-human-decision} --evidence {相称证据}`。不得扫描编号或手写账本行。全部账本写入完成后首次调用 `agent-infra-internal task-review {task-id} finalize-summary --stage plan --artifact {review-artifact} {execution-flag}`；失败后是否继续编辑并重跑，必须遵循 `.agents/rules/local-artifact-repair.md`，不能把失败类型或 `changed=false` 当作自动授权。
+
+从该次返回值绑定并复用以下结构化映射：
+
+```text
+{unresolved-blockers} = stageStatus.unresolvedFindingCounts.blocker
+{unresolved-major} = stageStatus.unresolvedFindingCounts.major
+{unresolved-minor} = stageStatus.unresolvedFindingCounts.minor
+```
+
+该 intent 原子最终化报告摘要并返回同一次账本快照；不得再调用 `stage-status`、手工替换占位符或扫描问题清单。失败后，模型只能在共享规则的机械安全门通过时修改同一个受控 artifact，并完整重跑相同 intent；每次失败都重新判断是否收敛。最终一次完整成功返回决定同一快照的 verdict 和计数：`stageStatus.canAdvance=true` 且结论为 Approved 时允许跨阶段推进；`stageStatus.canAdvance=false` 时仍须执行 `agent-infra-internal task-event {task-id} review-plan.completed --agent {standard-agent-token} --artifact {review-artifact} --verdict {approved|changes-requested|rejected} --blockers {unresolved-blockers} --major {unresolved-major} --minor {unresolved-minor} --manual-validation {n} {execution-flag}`，使用 `changes-requested` 并路由到同阶段修订/复审（报告明确拒绝时使用 `rejected`）。失败、模型停止、无进展或紧急熔断时，不发布完成事件或跨阶段命令，但必须按 `reference/output-templates.md` 的 `repair-stop` 场景展示已有 summary/findings、artifact、实际修复次数、最后诊断和停止原因。
 
 `manual-validation` 是 `ai task log` 中 review 行「人工校验点」（EN `Manual-validation`）计数的数据源；不要新增并行人工验证字段。
 
-如果 task.md 中存在有效的 `issue_number`，调用 `agent-infra-internal platform-comment sync {task-id} --kind task --agent {agent}`，再调用 `agent-infra-internal platform-comment sync {task-id} --kind artifact --artifact {review-artifact} --agent {agent}`；失败按 `.agents/rules/issue-sync.md` 记录 warning。
+如果 task.md 中存在有效的 `issue_number`，调用 `agent-infra-internal platform-comment sync {task-id} --kind task --agent {standard-agent-token}`，再调用 `agent-infra-internal platform-comment sync {task-id} --kind artifact --artifact {review-artifact} --agent {standard-agent-token}`；失败按 `.agents/rules/issue-sync.md` 记录 warning。
+
+最终化 intent 会在写入摘要前检查详情块 ID；任何可见重复都返回结构化失败并保持 artifact 字节不变，由模型按共享规则判断是否进行最小编辑。无法通过安全门、诊断重复、没有实际字节变化或达到紧急熔断时，停止在完成事件之前；停止路径仍必须展示已有审查结果，不得吞掉 artifact 内容。
 
 ### 7. 完成校验
 
@@ -84,7 +101,7 @@ agent-infra-internal task-verify {task-id} review-plan.completed --artifact {rev
 
 ### 8. 告知用户
 
-按 `reference/output-templates.md` 的结论分支输出，并展示所有 TUI 的下一步命令。
+按 `reference/output-templates.md` 的结论分支输出，并通过统一 helper 渲染已选场景的下一步命令。
 
 > 渲染最终输出前先读取 `.agents/rules/next-step-output.md` 并落实其两类规则：(1) 「下一步」命令的 `{task-ref}` 渲染为当前任务短号 `NN`（取值与回退见该文件），其他 `{task-id}` 占位（报告标题、路径）保持完整 TASK-id 形式；(2) 在面向用户输出的绝对最后一行追加 `Completed at` 收尾行（成功、错误、早退等任何面向用户输出都适用，不限于校验通过的成功态）。
 
@@ -93,7 +110,7 @@ agent-infra-internal task-verify {task-id} review-plan.completed --artifact {rev
 - [ ] 已审查最新方案上下文
 - [ ] 已创建 `{review-artifact}`
 - [ ] 已更新 task.md 并追加 Activity Log
-- [ ] 已展示所有 TUI 的下一步命令
+- [ ] 已通过统一 helper 渲染已选场景的下一步命令
 
 ## 注意事项
 

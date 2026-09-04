@@ -20,7 +20,7 @@ go vet ./...
 
 ## 2. 运行单元测试（按层级选择）
 
-Fleet 尚未划分独立的快速测试套件；smoke 和 core 均使用完整 Go 测试命令，full 在此基础上追加竞态检测。
+Fleet 尚未划分独立的快速测试套件；三层测试是可选的反馈速度优化，如果测试套件较小，所有层级都可以映射到同一个完整测试命令。因此 smoke 和 core 均使用完整 Go 测试命令，full 在此基础上追加竞态检测。
 
 ### smoke（目标 <5s）
 
@@ -58,6 +58,8 @@ go test -race ./...
 
 `go test ./...` 自动覆盖仓库内所有 Go package，包括 `tests/compat`。新增的 `*_test.go` 文件只要位于模块 package 中，就会被完整测试命令纳入。
 
+如果项目尚未分层，smoke / core / full 可以全部使用完整测试命令；分层不是使用协作工作流的前置条件。
+
 ## 3. 输出结果
 
 报告测试结果摘要：
@@ -76,11 +78,11 @@ go test -race ./...
 
 测试通过后，建议提交变更：
 
-> **重要**：以下「下一步」中列出的所有 TUI 命令格式必须完整输出，不要只展示当前 AI 代理对应的格式。如果 `.agents/.airc.json` 中配置了自定义 TUI（`customTUIs`），读取每个工具的 `name` 和 `invoke`，按同样格式补充对应命令行（`${skillName}` 替换为技能名，`${projectName}` 替换为项目名）。
+> 渲染下一步前先读取 `.agents/rules/next-step-output.md`，仅为已选场景调用统一 helper，并将 stdout 填入 `{next-step-commands}`。
+
+使用 `agent-infra-internal agent-client next-steps --skill commit` 生成本场景的 `{next-step-commands}`。
 
 ```
 下一步 - 提交代码：
-  - Claude Code / OpenCode：/commit
-  - Gemini CLI：/fleet:commit
-  - Codex CLI：$commit
+{next-step-commands}
 ```

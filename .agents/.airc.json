@@ -5,18 +5,14 @@
   "platform": {
     "type": "github"
   },
-  "templateVersion": "v0.9.1",
+  "templateVersion": "v0.9.12",
   "sandbox": {
     "engine": "orbstack",
     "runtimes": [
       "node22"
     ],
     "tools": [
-      "agent-infra",
-      "claude-code",
-      "codex",
-      "gemini-cli",
-      "opencode"
+      "agent-infra"
     ],
     "refreshIntervalDays": 7,
     "dockerfile": null,
@@ -42,7 +38,6 @@
       ".agents/skills/",
       ".agents/templates/",
       ".agents/workflows/",
-      ".agents/workspace/README.md",
       ".claude/commands/",
       ".codex/hooks.json",
       ".git-hooks/check-version-format.sh",
@@ -51,7 +46,11 @@
       ".github/workflows/metadata-sync.yml",
       ".github/workflows/pr-label.yml",
       ".github/workflows/status-label.yml",
-      ".git-hooks/check-large-files.cjs"
+      ".git-hooks/check-large-files.cjs",
+      ".claude/agents/",
+      ".claude/rules/",
+      ".codex/agents/",
+      ".traecli/commands/"
     ],
     "merged": [
       "**/post-release.*",
@@ -73,12 +72,101 @@
     "managedBaselines": {
       ".github/workflows/metadata-sync.yml": "sha256:6372ce9f924220ec6042c48d4ea9148aadc48878c67c63e1e21ab073417774d2",
       ".github/workflows/pr-label.yml": "sha256:8438d56392b63fe365d487b586bb2b242eb142dc3bbd24dd631e18b60e2e0a89",
-      ".github/workflows/status-label.yml": "sha256:c6939f9f86cdfedbc36b1c87b857ca41c0e8b4d6563c1bcd83a895e324e8f726"
+      ".github/workflows/status-label.yml": "sha256:c6939f9f86cdfedbc36b1c87b857ca41c0e8b4d6563c1bcd83a895e324e8f726",
+      ".claude/commands/analyze-task.md": "sha256:c7fdb2c2216a73ad3cd7235b5a3db1236403a79d4e173481f76305f8e0e30c8e",
+      ".claude/commands/archive-tasks.md": "sha256:48474560c30c8d20b9158c70b71ab0aca427da752286f3d652296f13e0c74111",
+      ".claude/commands/block-task.md": "sha256:4fa9797d61917f72bca15219fb3133c38ff23b75f5519c9e3283d66778081694",
+      ".claude/commands/cancel-task.md": "sha256:a5aeaa1e246d7e7d9a5ece55019dc65d75a5d1532ba126b2a21b73bdb70cd370",
+      ".claude/commands/check-task.md": "sha256:699b997955dd185e6ef2577dc65ad90fc49f2edfed533965ee0644dfa1a5fdfc",
+      ".claude/commands/close-codescan.md": "sha256:e12ffff357d4b9bc5cbb31611840ac582df85a6bbff7ce4dda2c9b61a194ca38",
+      ".claude/commands/close-dependabot.md": "sha256:1025955e2d32c46f2a46f6b2f326b2193535c82f707f575703d17c2c7db40128",
+      ".claude/commands/code-task.md": "sha256:582c86fd791ffdec22d946ed549623935b06519b54a74dc5c625379ae1bcbd39",
+      ".claude/commands/commit.md": "sha256:31d52ab44b5e1d868d59bf5df2118abfc4ee194b11d828a6fc1af072b92a145d",
+      ".claude/commands/complete-manual-validation.md": "sha256:6dbbebc0c34086e324d7704716a1fcb51bab2198954b38beed2798885fea45b5",
+      ".claude/commands/complete-task.md": "sha256:a2bb59c3f308a2780d947b6177ae7d0c1f33ccd5186f3d1f412327bfff612314",
+      ".claude/commands/create-pr.md": "sha256:b41f3ef8220d1f134d5a678e9a39951fe52300012118d2d85fcf4ff3344e56a5",
+      ".claude/commands/create-release-note.md": "sha256:69a8b34b442aca679bc8cf53a6362a031861cc34ae09a6b9c4567b000b136953",
+      ".claude/commands/create-task.md": "sha256:02950cdbb38a053029b1deb79b78be5a48ca8d3296dcb794774fe690cd565bbe",
+      ".claude/commands/import-codescan.md": "sha256:73a667b4152b0dfd88c61c05369eedc80ffa4a91eb2fef628ba13d28c61d36db",
+      ".claude/commands/import-dependabot.md": "sha256:daa6f6de1175931f280116b558c418813cf9fb24e5adca4aa474e258ce1f8155",
+      ".claude/commands/import-issue.md": "sha256:b3fd637fd02920f0f384bb613984ba7bc8068a874b9b4bdd780f7935b2f29ac6",
+      ".claude/commands/init-labels.md": "sha256:5f830fe9a3eef533f6abcb98ea24caf37830825e55a1df39ac27cff67ae58d66",
+      ".claude/commands/init-milestones.md": "sha256:9a7ffd3670158e4e34e31c7dcb9987d6eb4e2d3e2ddd6b7e5b1454791688f034",
+      ".claude/commands/plan-task.md": "sha256:e0d12ffac1ad65fb568a5219895ef28012719dd71de4c63c153dababe153e41d",
+      ".claude/commands/refine-title.md": "sha256:cd63b17f0c151b21ac85bd0700a52f6e3c81e3ae6aa22e0b6c11036e2b0d4cdd",
+      ".claude/commands/restore-task.md": "sha256:30d3d63317b4dae986cc8c0c21ac024746375082a76907286b6e03a4a13bca6a",
+      ".claude/commands/review-analysis.md": "sha256:e31ea897e3fb28c864fb9e95888a21dcf95acb7db8713a70edd69737dc15ebdf",
+      ".claude/commands/review-code.md": "sha256:4d7958f04237241006cdaf63ac47bd9547c8c04b66b75fc8bc27b2a18ae48898",
+      ".claude/commands/review-plan.md": "sha256:fba112f44958401915aa44372f58e6dff899f8f410b22fc8488ef228a867c6c5",
+      ".claude/commands/review-pr.md": "sha256:8c2c6100b2e3ef783a276757ed4f44d23d7734f27ce9952ede00c5ba58bef8ea",
+      ".claude/commands/run-manual-validation.md": "sha256:bc740ae3ac15f70bc371feaf673aff312672768abef2cbeb31440b3ccdcf7ca8",
+      ".claude/commands/run-task.md": "sha256:92b1707e8aa06686bac422c2f09002ddf86ffbdb4ad8779631c341ac787ceddb",
+      ".claude/commands/update-agent-infra.md": "sha256:812379def35ef59a3739fbb199c2c4e63e83cdf7b4e252ce0c2bab832a3099bc",
+      ".claude/commands/watch-pr.md": "sha256:c4a6f8033c34e5a39296f57c70d9381920a25aa346cfcc93f0e45e9f3b4c7a87",
+      ".codex/hooks.json": "sha256:c67cdc0e064f0b8efbe0eb8ae05a457a5544389b42f95a9a97463e02dd344f8b",
+      ".opencode/commands/analyze-task.md": "sha256:3bd84f4b2d1112d5cddad6d54fb1eaf1f959467d0e18abe2c8851b2d5eb28bb4",
+      ".opencode/commands/archive-tasks.md": "sha256:2eaf6011a8ee85051e19d964021f2936d3bb2aa43236fc4a06cef58e836f7dbd",
+      ".opencode/commands/block-task.md": "sha256:c176acea224dd08b882c3950e83c56ec613c2c7a2b6f57a46e4a350eb3eca80f",
+      ".opencode/commands/cancel-task.md": "sha256:f48c9e463bed2ae94661647655765cb24c32c6abec15966003356904e89eed05",
+      ".opencode/commands/check-task.md": "sha256:a6afc54f0c9488b863b9903b65db9c9f3403dbbc8fb6b3adaf30b6488fcd8be4",
+      ".opencode/commands/close-codescan.md": "sha256:d0cfae8569415a21f694207eec59c60327ad682b72e0f281900ba81c9ea33ee7",
+      ".opencode/commands/close-dependabot.md": "sha256:0a4e63a68722fdd0e4ab1e8614d87069a38c2680c07ed9dd9424cd5db1d41a8e",
+      ".opencode/commands/code-task.md": "sha256:830791c214845b9c676c931f0528e2f56dd7964551bf857022516e42086a7263",
+      ".opencode/commands/commit.md": "sha256:29fe2fb482716a28c3991ff89956075a0c727f9dd45fb9297c7f6d09b9a6a260",
+      ".opencode/commands/complete-manual-validation.md": "sha256:ef26b0a486ed7c6e791f1fc24188aa60694c32fbf3d5b399182c95e6f23ed129",
+      ".opencode/commands/complete-task.md": "sha256:b08adfb4107c6be3251e81e0d57ca9a306a71c63816a642cea40cc40a20e1c8a",
+      ".opencode/commands/create-pr.md": "sha256:3c00181e54b331d25defb0efc63487668f21d3b92238715dc0eca7293daf401f",
+      ".opencode/commands/create-release-note.md": "sha256:c6b702bed87b713dcde5a37478d2068a5314a24b764a51ffb6c4a7674c7900a2",
+      ".opencode/commands/create-task.md": "sha256:9c13bac6c1178f5a94f43d6ab069fe4f8b67a96d4cdfcbc82f43b5afbed4cf1e",
+      ".opencode/commands/import-codescan.md": "sha256:53696cdbbce9f40bfab1850f91079c956205b3d66f90bbd5587c39eea998884e",
+      ".opencode/commands/import-dependabot.md": "sha256:4650a580ab3fa284f5b0a7fc9d88856c53ebbe22758fbe3db8c48a02ad9a5886",
+      ".opencode/commands/import-issue.md": "sha256:368e2936d7ae63bffcfdbfeb4580caef27f7a0b99130e0de7565ad04316f9b59",
+      ".opencode/commands/init-labels.md": "sha256:58300a139e2e7de3a869e151fa82f02ec9ec75065a77be398d8fce5642d3b908",
+      ".opencode/commands/init-milestones.md": "sha256:b8363e95f1603e8e402909b198d3037d115780c154e0346cd3dff29a5858bba0",
+      ".opencode/commands/plan-task.md": "sha256:341f03827a7ae7a2e91261bd43269b28c93c8464d31f12758d7d641579d9d1da",
+      ".opencode/commands/refine-title.md": "sha256:aaee250a58997a036bba6b396342f3508a702d59c569b6f276399c5251bae4f3",
+      ".opencode/commands/restore-task.md": "sha256:78843aa3d510d5e6258d707adc0bab5c2ec9d6ce56cb3879f918b29aa438dddf",
+      ".opencode/commands/review-analysis.md": "sha256:297203f2dcb022c541f36a5dc021d58d77f697e0ddaa1062fc6af70a3604c2fd",
+      ".opencode/commands/review-code.md": "sha256:78b4c3a75a383b514df660b6bd365fd58dee281124e6d4b5160745856ed1f762",
+      ".opencode/commands/review-plan.md": "sha256:b5fc5a10d229174158f21db61537771a859c3cc4b213624df7c33818e12be803",
+      ".opencode/commands/review-pr.md": "sha256:fc9855c9548a5407b8eb307e975cba7f95adc61b0b41737bb42ae3868bd6845d",
+      ".opencode/commands/run-manual-validation.md": "sha256:24874d258f5a047b9f567846275580a91a72de76ff96dd8352f1fc7ba977dd19",
+      ".opencode/commands/run-task.md": "sha256:01a83a668fcc4a095949e97606bf2fe4f0c1546aa1adbd95777b6befb68780e1",
+      ".opencode/commands/update-agent-infra.md": "sha256:0fa83403ed7be5936cebca647f48e94796728fe2fed85d8e4390df3b4380267f",
+      ".opencode/commands/watch-pr.md": "sha256:2e9a5f250b07a0cd870db335651df5c0940c8225013eb0579b9a2aa7f6177ced",
+      ".claude/agents/agent-infra-lifecycle-executor.md": "sha256:c3fb5e83ce91648f1f74122d13113a2a39ef025983c8920703a424187d4a2238",
+      ".claude/agents/agent-infra-lifecycle-reviewer.md": "sha256:08c423761825b5211810ef4a28673c4e9a32e2fa64595d261dae47e7d9a8c1eb",
+      ".claude/rules/tool-preferences.md": "sha256:610984771f3af595a0b25a94942b5b0aea3ea2fd602c25633de7958dee336f9f",
+      ".codex/agents/agent-infra-lifecycle-executor.toml": "sha256:49dd60ccf8458178c3c0c71d3065bbcf931931bd7abee9a6395b3c28a983c676",
+      ".codex/agents/agent-infra-lifecycle-reviewer.toml": "sha256:0a359e4f454101e45a1271563bd205dad32fbd64e0a178698199f083c7efb96a",
+      ".traecli/commands/update-agent-infra.md": "sha256:e9f2d948c9619c9a4f6ba7bd9385eb7314f9d6233929c3beb54fcda863f5c626"
     }
   },
-  "tuis": [
-    "claude-code",
-    "codex",
-    "opencode"
+  "agentClients": [
+    {
+      "id": "claude-code",
+      "enabled": true,
+      "installInSandbox": true
+    },
+    {
+      "id": "codex",
+      "enabled": true,
+      "installInSandbox": true
+    },
+    {
+      "id": "antigravity-cli",
+      "enabled": true,
+      "installInSandbox": true
+    },
+    {
+      "id": "opencode",
+      "enabled": true,
+      "installInSandbox": true
+    },
+    {
+      "id": "traecli",
+      "enabled": true,
+      "installInSandbox": true
+    }
   ]
 }

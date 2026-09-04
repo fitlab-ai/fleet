@@ -11,11 +11,13 @@
 - [`next-step-output.md`](next-step-output.md) — 「下一步」输出规则：任务短号渲染与 `Completed at` 收尾行。
 - [`version-stamp.md`](version-stamp.md) — `agent_infra_version` 版本戳的取值命令与写入时机。
 - [`debugging-guide.md`](debugging-guide.md) — 结构化调试流程：收集证据→形成假设→验证假设→修复根因，禁止盲目改代码重试。
+- [`compatibility-policy.md`](compatibility-policy.md) — 兼容性默认关闭：准入证据、实现边界、退出条件与生命周期审查要求。
+- [`sync-content-generation.md`](sync-content-generation.md) — 同步到 Issue 的任务和生命周期 Markdown 生成约束。
 
 ## Issue / PR
 
 - [`issue-pr-commands.md`](issue-pr-commands.md) — PR 命令集与 Issue intent 入口说明。
-- [`pr-checks-commands.md`](pr-checks-commands.md) — 监控 PR required checks、拉取失败日志的命令集（`watch-pr`）。
+- [`pr-checks-commands.md`](pr-checks-commands.md) — 监控 PR 全部 checks、拉取失败日志的命令集（`watch-pr`）。
 - [`create-issue.md`](create-issue.md) — `create-task` 落盘后的声明式 Issue 创建 intent。
 - [`issue-sync.md`](issue-sync.md) — Issue 评论 marker 与声明式元数据 intent 契约。
 - [`issue-fields.md`](issue-fields.md) — 动态 Issue Type pinned 字段映射边界。
@@ -24,12 +26,15 @@
 ## 任务工作流
 
 - [`task-management.md`](task-management.md) — 任务语义识别与工作流命令映射。
+- [`lifecycle-orchestration.md`](lifecycle-orchestration.md) — `run-task` 的 fresh executor/reviewer、一次性 receipt、暂停恢复与安全终点规则。
 - [`review-handshake.md`](review-handshake.md) — 三阶段双向审查握手协议：四态处置、对称证据、分歧账本、收敛与 post-review commit 门禁。
+- [`review-method.md`](review-method.md) — 三阶段共享检视方法：多遍检视、风险镜头、追踪与 finding 证据契约。
+- [`local-artifact-repair.md`](local-artifact-repair.md) — review artifact 失败后的模型逐例修复、机械安全门、动态收敛与结果输出契约。
 - [`human-decision-context.md`](human-decision-context.md) — 新建人工裁决详情的自足上下文与规范结构。
 - [`task-short-id.md`](task-short-id.md) — 裸数字任务短号的解析、分配与生命周期。
 - [`milestone-inference.md`](milestone-inference.md) — create-task / code-task / create-pr 的 milestone 推断。
-- [`label-milestone-setup.md`](label-milestone-setup.md) — 初始化 label / milestone 的平台命令集。
-- [`security-alerts.md`](security-alerts.md) — 导入 / 关闭 Dependabot 与 Code Scanning 告警的命令集。
+- [`label-milestone-setup.md`](label-milestone-setup.md) — 初始化 label / milestone 的共享入口。
+- [`security-alerts.md`](security-alerts.md) — 导入 / 关闭依赖与代码扫描告警的共享入口。
 
 ## 提交与发布
 

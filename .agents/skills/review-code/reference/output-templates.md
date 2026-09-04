@@ -17,14 +17,30 @@
 - 不要混用不同场景的文案
 - 只要 `Blocker > 0`，就绝对不能输出通过模板
 - manual-validation 项绝对不能被计入 blocker / major / minor 计数，也不能用作触发场景 B/C/D 的依据
-- 所选场景中必须包含所有 TUI 命令格式
+- 所选场景必须通过统一 helper 生成 `{next-step-commands}`
 - 计数行固定显示 5 个数字。manual-validation（`{e}`）不影响分支；`人工裁决`（`{h}`）是本阶段 `needs-human-decision` 行数，属于未闭环账本状态，因此 `{h} > 0` 时 `canAdvance=false`，必须按 `.agents/rules/next-step-output.md` 的「人工裁决待办前置块」展开详情，并只输出修订与复审路径。
 
-场景 B/C/D 在修订命令后继续列出复审命令：`/review-code {task-ref}`、`/fleet:review-code {task-ref}`、`$review-code {task-ref}`。
+### 场景 R：最终化停止但结果可见
+
+当 finalizer 失败，或模型因安全门、无进展、重复诊断或紧急熔断停止时，使用本场景，不调用统一 helper，也不输出跨阶段命令。
+
+```text
+任务 {task-id} 审查结果已生成，但生命周期未推进。
+- 审查产物：.agents/workspace/active/{task-id}/{review-artifact}
+- 最后有效 summary/findings：{last-readable-review-result}
+- 本地修复次数：{repairAttempts}
+- 最后诊断：{last-structured-diagnostic}
+- 停止原因：{stop-reason}
+- 完成事件：未发布 | 跨阶段命令：未生成
+
+说明：本次仅停止生命周期推进，已有审查结果仍可查看。请先进行人工处理，或重新运行当前审查技能。
+```
+
+如果 summary 无法安全解析，`{last-readable-review-result}` 必须改为“摘要不可安全解析”，并保留 artifact 路径和原始结构化诊断；不得推算计数或补写结论。
 
 ### 场景 A：通过且无问题
 
-通过后不得按轮次路由。先比较审查快照树 `T` 与基线 `R` 的树，再读取任务的 `prFlow` / `pr_number`；存在 PR 时调用 `agent-infra-internal platform-checks inspect {task-id}`。只选择以下一个互斥出口：
+通过后不得按轮次路由。先比较审查快照树 `T` 与基线 `R` 的树，再读取任务的 `prFlow` / verified `pr_delivery_fact`；存在 PR 时调用 `agent-infra-internal platform-checks inspect {task-id}`。只选择以下一个互斥出口：
 
 - `T != R^{tree}`：场景 A1（提交）。
 - `T == R^{tree}` 且无 PR：`prFlow=disabled` 用场景 A4（完成），否则用场景 A2（创建 PR）。
@@ -45,41 +61,43 @@
 
 #### 场景 A1：提交或推送
 
+使用 `agent-infra-internal agent-client next-steps --skill commit --task-ref {task-ref}` 生成本场景的 `{next-step-commands}`。
+
 ```text
 下一步 - 提交或推送代码：
-  - Claude Code / OpenCode：/commit {task-ref}
-  - Gemini CLI：/fleet:commit {task-ref}
-  - Codex CLI：$commit {task-ref}
+{next-step-commands}
 ```
 
 #### 场景 A2：创建 Pull Request
 
+使用 `agent-infra-internal agent-client next-steps --skill create-pr --task-ref {task-ref}` 生成本场景的 `{next-step-commands}`。
+
 ```text
 下一步 - 创建 Pull Request：
-  - Claude Code / OpenCode：/create-pr {task-ref}
-  - Gemini CLI：/fleet:create-pr {task-ref}
-  - Codex CLI：$create-pr {task-ref}
+{next-step-commands}
 ```
 
-#### 场景 A3：监控 required checks
+#### 场景 A3：监控全部 checks
+
+使用 `agent-infra-internal agent-client next-steps --skill watch-pr --task-ref {task-ref}` 生成本场景的 `{next-step-commands}`。
 
 ```text
 下一步 - 监控 PR 检查：
-  - Claude Code / OpenCode：/watch-pr {task-ref}
-  - Gemini CLI：/fleet:watch-pr {task-ref}
-  - Codex CLI：$watch-pr {task-ref}
+{next-step-commands}
 ```
 
 #### 场景 A4：完成并归档
 
+使用 `agent-infra-internal agent-client next-steps --skill complete-task --task-ref {task-ref}` 生成本场景的 `{next-step-commands}`。
+
 ```text
 下一步 - 完成并归档任务：
-  - Claude Code / OpenCode：/complete-task {task-ref}
-  - Gemini CLI：/fleet:complete-task {task-ref}
-  - Codex CLI：$complete-task {task-ref}
+{next-step-commands}
 ```
 
 ### 场景 B：需要修改（major / minor）
+
+使用 `agent-infra-internal agent-client next-steps --skill code-task --task-ref {task-ref}` 生成本场景的 `{next-step-commands}`。
 
 ```text
 任务 {task-id} 代码审查完成。结论：需要修改。
@@ -87,9 +105,7 @@
 - 审查报告：.agents/workspace/active/{task-id}/{review-artifact}
 
 下一步 - 修复问题：
-  - Claude Code / OpenCode：/code-task {task-ref}
-  - Gemini CLI：/fleet:code-task {task-ref}
-  - Codex CLI：$code-task {task-ref}
+{next-step-commands}
 
 [当 manual-validation > 0 时，在最后附加一行：]
 提醒：manual-validation 项需在 PR description 的「待人工验证」清单中承接，不应触发 /code-task。
@@ -97,15 +113,15 @@
 
 ### 场景 C：需要修改
 
+使用 `agent-infra-internal agent-client next-steps --skill code-task --task-ref {task-ref}` 生成本场景的 `{next-step-commands}`。
+
 ```text
 任务 {task-id} 代码审查完成。结论：需要修改。
 - 阻塞项：{n} | 主要问题：{n} | 次要问题：{n} | 人工校验点：{e} | 人工裁决：{h}
 - 审查报告：.agents/workspace/active/{task-id}/{review-artifact}
 
 下一步 - 修复问题：
-  - Claude Code / OpenCode：/code-task {task-ref}
-  - Gemini CLI：/fleet:code-task {task-ref}
-  - Codex CLI：$code-task {task-ref}
+{next-step-commands}
 
 [当 manual-validation > 0 时，在最后附加一行：]
 提醒：manual-validation 项需在 PR description 的「待人工验证」清单中承接，不应触发 /code-task。
@@ -113,15 +129,15 @@
 
 ### 场景 D：拒绝
 
+使用 `agent-infra-internal agent-client next-steps --skill plan-task --task-ref {task-ref}` 生成本场景的 `{next-step-commands}`。
+
 ```text
 任务 {task-id} 代码审查完成。结论：拒绝，需要重新设计方案。
 - 阻塞项：{n} | 主要问题：{n} | 次要问题：{n} | 人工校验点：{e} | 人工裁决：{h}
 - 审查报告：.agents/workspace/active/{task-id}/{review-artifact}
 
 下一步 - 重新设计技术方案：
-  - Claude Code / OpenCode：/plan-task {task-ref}
-  - Gemini CLI：/fleet:plan-task {task-ref}
-  - Codex CLI：$plan-task {task-ref}
+{next-step-commands}
 
 > 注意：Rejected 表示实现方向需要整体重做，不是局部修复。核心 artifact lifecycle 的分支 #7 会拒绝直接 `/code-task`，要求先重新方案设计。
 
