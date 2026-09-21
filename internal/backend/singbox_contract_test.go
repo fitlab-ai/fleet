@@ -23,14 +23,19 @@ import (
 
 type contractRunner struct {
 	mu         sync.Mutex
-	calls      [][]string
+	calls      []contractRunnerCall
 	curlResult platform.Result
 	curlErr    error
 }
 
-func (r *contractRunner) Run(command []string, _ string, _ map[string]string, _ time.Duration) (platform.Result, error) {
+type contractRunnerCall struct {
+	command []string
+	timeout time.Duration
+}
+
+func (r *contractRunner) Run(command []string, _ string, _ map[string]string, timeout time.Duration) (platform.Result, error) {
 	r.mu.Lock()
-	r.calls = append(r.calls, append([]string(nil), command...))
+	r.calls = append(r.calls, contractRunnerCall{command: append([]string(nil), command...), timeout: timeout})
 	r.mu.Unlock()
 	if len(command) > 1 {
 		switch command[1] {
@@ -50,11 +55,22 @@ func (r *contractRunner) count(argument string) int {
 	defer r.mu.Unlock()
 	count := 0
 	for _, call := range r.calls {
-		if len(call) > 1 && call[1] == argument {
+		if len(call.command) > 1 && call.command[1] == argument {
 			count++
 		}
 	}
 	return count
+}
+
+func (r *contractRunner) call(argument string) (contractRunnerCall, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, call := range r.calls {
+		if len(call.command) > 1 && call.command[1] == argument {
+			return call, true
+		}
+	}
+	return contractRunnerCall{}, false
 }
 
 func contractNodes() []model.Node {
@@ -325,6 +341,15 @@ func (h *probeProcessHarness) snapshot() (string, bool, int) {
 	return h.runtimeDir, h.alive, len(h.signals)
 }
 
+func (h *probeProcessHarness) port() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.listener == nil {
+		return 0
+	}
+	return h.listener.Addr().(*net.TCPAddr).Port
+}
+
 type probeProcessHandle struct{ harness *probeProcessHarness }
 
 func (h probeProcessHandle) PID() int         { return h.harness.pid }
@@ -338,21 +363,25 @@ func TestSingBoxProbeOutboundContract(t *testing.T) {
 		listen        bool
 		immediateExit bool
 		curl          platform.Result
+		curlErr       error
 		wantStatus    dataplane.HealthStatus
 		wantReason    dataplane.ErrorCode
 		cancelAfter   time.Duration
 		wantErr       error
 		wantSignals   int
+		wantCurlCalls int
 		maxDuration   time.Duration
 	}{
-		{name: "healthy HTTPS", listen: true, curl: platform.Result{Stdout: "204"}, wantStatus: dataplane.HealthHealthy, wantSignals: 1},
-		{name: "TCP ready but HTTPS failed", listen: true, curl: platform.Result{Stdout: "000"}, wantStatus: dataplane.HealthUnhealthy, wantReason: dataplane.CodeProbe, wantSignals: 1},
+		{name: "healthy HTTPS", listen: true, curl: platform.Result{Stdout: "204"}, wantStatus: dataplane.HealthHealthy, wantSignals: 1, wantCurlCalls: 1},
+		{name: "TCP ready but HTTPS failed", listen: true, curl: platform.Result{Stdout: "000"}, wantStatus: dataplane.HealthUnhealthy, wantReason: dataplane.CodeProbe, wantSignals: 1, wantCurlCalls: 1},
+		{name: "HTTPS runner failed", listen: true, curlErr: errors.New("curl failed"), wantStatus: dataplane.HealthUnhealthy, wantReason: dataplane.CodeProbe, wantSignals: 1, wantCurlCalls: 1},
+		{name: "HTTPS runner timed out", listen: true, curlErr: context.DeadlineExceeded, wantStatus: dataplane.HealthUnhealthy, wantReason: dataplane.CodeProbe, wantSignals: 1, wantCurlCalls: 1},
 		{name: "core exits before readiness", immediateExit: true, wantStatus: dataplane.HealthUnhealthy, wantReason: dataplane.CodeStart, maxDuration: 500 * time.Millisecond},
 		{name: "readiness canceled", cancelAfter: 80 * time.Millisecond, wantErr: context.DeadlineExceeded, wantSignals: 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			harness := newProbeProcessHarness(test.listen, test.immediateExit)
-			runner := &contractRunner{curlResult: test.curl}
+			runner := &contractRunner{curlResult: test.curl, curlErr: test.curlErr}
 			box := &SingBox{
 				Binary: "/usr/local/bin/sing-box", Runner: runner,
 				Launcher: harness, Inspector: harness,
@@ -388,8 +417,23 @@ func TestSingBoxProbeOutboundContract(t *testing.T) {
 			if _, statErr := os.Stat(root); !errors.Is(statErr, os.ErrNotExist) {
 				t.Fatalf("probe runtime directory remains: %s (%v)", root, statErr)
 			}
-			if test.listen && runner.count("--proxy") != 1 {
-				t.Fatalf("curl calls = %d, want 1", runner.count("--proxy"))
+			if got := runner.count("--proxy"); got != test.wantCurlCalls {
+				t.Fatalf("curl calls = %d, want %d", got, test.wantCurlCalls)
+			}
+			if test.wantCurlCalls == 1 {
+				call, ok := runner.call("--proxy")
+				if !ok {
+					t.Fatal("curl call was not recorded")
+				}
+				want := []string{
+					"curl", "--proxy", "http://127.0.0.1:" + stringPort(harness.port()),
+					"--noproxy", "", "--silent", "--output", "/dev/null",
+					"--write-out", "%{http_code}", "--connect-timeout", "10",
+					"--max-time", "10", "https://health.example/status",
+				}
+				if !slices.Equal(call.command, want) || call.timeout != 12*time.Second {
+					t.Fatalf("curl call = %q timeout=%s, want %q timeout=%s", call.command, call.timeout, want, 12*time.Second)
+				}
 			}
 		})
 	}
