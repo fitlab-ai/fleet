@@ -16,17 +16,18 @@ import (
 )
 
 type fakePlane struct {
-	id           dataplane.BackendID
-	validateErr  error
-	startErr     error
-	probeErr     error
-	cancelStart  context.CancelFunc
-	validations  int
-	renders      int
-	starts       int
-	stops        int
-	stopErr      error
-	stopCtxError error
+	id            dataplane.BackendID
+	validateErr   error
+	startErr      error
+	probeErr      error
+	cancelStart   context.CancelFunc
+	validations   int
+	renders       int
+	starts        int
+	stops         int
+	stopErr       error
+	stopCtxError  error
+	probeRequests []dataplane.ProbeRequest
 }
 
 func (f *fakePlane) ID() dataplane.BackendID { return f.id }
@@ -74,7 +75,9 @@ func (f *fakePlane) Stop(ctx context.Context, _ dataplane.Instance) error {
 	f.stopCtxError = ctx.Err()
 	return f.stopErr
 }
-func (f *fakePlane) Probe(context.Context, dataplane.ProbeRequest) (dataplane.HealthResult, error) {
+
+func (f *fakePlane) Probe(_ context.Context, request dataplane.ProbeRequest) (dataplane.HealthResult, error) {
+	f.probeRequests = append(f.probeRequests, request)
 	return dataplane.HealthResult{Status: dataplane.HealthHealthy}, f.probeErr
 }
 
@@ -384,6 +387,54 @@ func TestManagerValidationFailureDoesNotCreateState(t *testing.T) {
 	}
 	if _, err := manager.Store.Load(); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("state created after validation failure: %v", err)
+	}
+}
+
+func TestManagerRejectsUnsupportedCapabilityBeforeSideEffects(t *testing.T) {
+	for name, input := range map[string]StartInput{
+		"protocol": {Node: model.Node{Name: "future", Type: "future"}, Mode: dataplane.ModeProxy, Port: 7890},
+		"mode":     {Node: model.Node{Name: "node", Type: "vmess"}, Mode: "future", Port: 7890},
+	} {
+		t.Run(name, func(t *testing.T) {
+			plane := &fakePlane{id: "sing-box"}
+			manager := newTestManager(t, "", plane)
+			if _, err := manager.Start(t.Context(), input); !dataplane.IsCode(err, dataplane.CodeUnsupported) {
+				t.Fatalf("Start() error = %v, want unsupported", err)
+			}
+			if plane.validations != 0 || plane.renders != 0 || plane.starts != 0 {
+				t.Fatalf("side effects: validate=%d render=%d start=%d", plane.validations, plane.renders, plane.starts)
+			}
+			if _, err := manager.Store.Load(); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("state created after capability rejection: %v", err)
+			}
+		})
+	}
+}
+
+func TestManagerStatusUsesInstanceProbe(t *testing.T) {
+	plane := &fakePlane{id: "sing-box"}
+	manager := newTestManager(t, "", plane)
+	wantInstance := dataplane.Instance{
+		ID: "lease", Backend: "sing-box", Mode: dataplane.ModeProxy,
+		Process: dataplane.ProcessIdentity{PID: 4242, Executable: "/bin/fake"},
+	}
+	if err := manager.Store.Save(&State{
+		Schema: SchemaV2, Phase: PhaseActive, LeaseID: "lease", Mode: dataplane.ModeProxy,
+		Port: 7890, Instance: wantInstance,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state, health, err := manager.Status(t.Context())
+	if err != nil || state.Phase != PhaseActive || health.Status != dataplane.HealthHealthy {
+		t.Fatalf("Status() = %#v, %#v, %v", state, health, err)
+	}
+	if len(plane.probeRequests) != 1 {
+		t.Fatalf("probe calls = %d, want 1", len(plane.probeRequests))
+	}
+	request := plane.probeRequests[0]
+	if request.Kind != dataplane.ProbeInstance || request.Instance == nil || request.Instance.Process.PID != wantInstance.Process.PID ||
+		request.Endpoint.Host != "127.0.0.1" || request.Endpoint.Port != 7890 {
+		t.Fatalf("probe request = %#v", request)
 	}
 }
 

@@ -34,10 +34,10 @@ go test ./...
 ### platform-smoke（跨平台边界）
 
 ```bash
-go test ./tests/compat/...
+go test ./internal/backend ./internal/platform ./internal/runtime
 ```
 
-用于验证真实 CLI 迁移兼容性边界；不得直接执行遗留测试源文件。
+用于验证数据面进程、操作系统抽象和运行时资源所有权边界。真实系统权限、macOS 系统代理和 TUN 行为仍需在对应宿主人工验证。
 
 ### smoke（参考目标 <10s）
 
@@ -73,7 +73,7 @@ go test -race ./...
 - CI
 - main 合并前的最终把关
 
-`go test ./...` 自动覆盖仓库内所有 Go package，包括 `tests/compat`。新增的 `*_test.go` 文件只要位于模块 package 中，就会被完整测试命令纳入。
+`go test ./...` 自动覆盖仓库内所有 Go package。新增的 `*_test.go` 文件只要位于模块 package 中，就会被完整测试命令纳入。
 
 如果项目尚未分层，smoke / core / full 可以全部使用完整测试命令；分层不是使用协作工作流的前置条件。
 

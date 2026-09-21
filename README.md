@@ -230,11 +230,6 @@ the configured data-plane adapter. An unused registered adapter cannot block
 publication. Lifecycle cleanup restores the macOS proxy only while it is still
 owned by Fleet, so an external proxy change is not overwritten.
 
-`tests/compatibility-matrix.md` is
-the permanent compatibility ledger for all 48 historical behavior IDs. Its Go
-gate verifies that every ID has one terminal evidence row and that every cited
-Go test symbol exists, without retaining or executing the retired Python tests.
-
 The listening port defaults to `7890` and can be overridden:
 
 ```sh

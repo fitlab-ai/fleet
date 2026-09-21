@@ -94,6 +94,33 @@ func TestHealthRetriesAfterEarlyCoreExit(t *testing.T) {
 	}
 }
 
+func TestHealthDoesNotTreatTCPReachabilityAsProxyHealth(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	address := listener.Addr().(*net.TCPAddr)
+	node := model.Node{Name: "tcp-only", Type: "vmess", Server: address.IP.String(), Port: address.Port}
+	app, out := diagnosticApp(t, []model.Node{node})
+	plane := &refreshPlane{id: "sing-box"}
+	plane.probe = func(model.Node) (dataplane.HealthResult, error) {
+		return dataplane.HealthResult{Status: dataplane.HealthUnhealthy, Reason: dataplane.CodeProbe}, nil
+	}
+	registry, err := dataplane.NewRegistry("sing-box", plane)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.DataPlanes = registry
+	app.Config.Backend = "sing-box"
+	if code := app.Health(""); code != 1 {
+		t.Fatalf("Health() code = %d, want 1", code)
+	}
+	if !strings.Contains(out.String(), "UNHEALTHY") || strings.Contains(out.String(), "REACHABLE") {
+		t.Fatalf("health output conflates TCP and proxy health: %q", out.String())
+	}
+}
+
 func TestHealthRequiresDataPlaneRegistry(t *testing.T) {
 	app, out := diagnosticApp(t, []model.Node{{Name: "node", Type: "vmess"}})
 

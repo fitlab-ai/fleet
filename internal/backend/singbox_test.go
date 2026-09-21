@@ -88,6 +88,9 @@ type adapterLauncher struct {
 
 func (l *adapterLauncher) Start(_ context.Context, request platform.LaunchRequest) (platform.ProcessHandle, error) {
 	l.request = request
+	if request.Stdout != nil {
+		_, _ = io.WriteString(request.Stdout, "redacted log")
+	}
 	return adapterHandle{pid: 4242}, nil
 }
 
@@ -491,7 +494,18 @@ func TestSingBoxImplementsDataPlaneRenderAndStart(t *testing.T) {
 	if launcher.request.Stdout == nil || launcher.request.Stderr == nil {
 		t.Fatal("adapter did not capture process output")
 	}
-	_, _ = io.WriteString(launcher.request.Stdout, "redacted log")
+	logPath := filepath.Join(root, "sing-box.log")
+	info, err := os.Stat(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("log mode = %o, want 600", info.Mode().Perm())
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil || string(logData) != "redacted log" {
+		t.Fatalf("log contents = %q, %v", logData, err)
+	}
 }
 
 func TestSingBoxTUNRenderPinsAndExcludesOneResolvedProxyServerAddress(t *testing.T) {

@@ -86,7 +86,11 @@ func normalizeHysteria2(node *model.Node) error {
 		}
 	}
 	internal := map[string]any{}
-	if value, ok := node.Ports.(string); ok && value != "" {
+	if node.Ports != nil {
+		value, ok := node.Ports.(string)
+		if !ok || strings.TrimSpace(value) == "" {
+			return model.NewError("node", "Hysteria2 ports has invalid syntax", nil)
+		}
 		var normalized []string
 		for _, part := range strings.Split(value, ",") {
 			m := regexp.MustCompile(`^([0-9]+)(?:-([0-9]+))?$`).FindStringSubmatch(strings.TrimSpace(part))
