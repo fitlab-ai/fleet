@@ -22,10 +22,12 @@ go build -trimpath -o dist/fleet ./cmd/fleet
 ## 2. 运行集成测试
 
 ```bash
-go test ./tests/compat/...
+go test ./internal/app ./internal/backend ./internal/runtime
 ```
 
-该 package 验证 Go 实现与迁移兼容性矩阵保持一致。不得直接执行遗留测试源文件；涉及并发、生命周期、代理或文件状态时追加 `go test -race ./...`。
+这些 package 覆盖控制面到数据面适配器的诊断、配置、进程生命周期和资源所有权契约。
+其中真实 sing-box 配置检查在未安装二进制时会显式 skip，必须作为环境缺口报告，不能记为集成验证通过。
+涉及并发、生命周期、代理或文件状态时追加 `go test -race ./internal/app ./internal/backend ./internal/runtime`。
 
 ## 3. 输出结果
 
@@ -58,6 +60,6 @@ go test ./tests/compat/...
 
 1. **前置条件**：必须先成功构建 Fleet CLI；构建失败时先执行 test 技能排查
 2. **技术栈**：只执行 Go 构建和 Go 测试命令
-3. **兼容性矩阵**：`tests/compat` 是迁移兼容性验证入口，不得直接执行遗留测试源文件
+3. **验证范围**：执行 app、backend 和 runtime 的现有行为测试
 4. **环境**：集成测试通常耗时较长；请耐心等待
 5. **清理**：测试完成后不要提交 `dist/fleet`

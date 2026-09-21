@@ -54,12 +54,12 @@ go test ./...
 go test -race ./...
 ```
 
-开发期间可使用 `go test ./...`；跨 package 的迁移兼容性检查使用 `go test ./tests/compat/...`。
+开发期间可使用 `go test ./...`；数据面、操作系统抽象和运行时资源边界使用 `go test ./internal/backend ./internal/platform ./internal/runtime` 定向检查。
 
 ### 2. 测试目录或层级
 
 - 测试文件与被测 package 放在同一目录，命名为 `*_test.go`。
-- 跨 package 的迁移兼容性检查放在 `tests/compat`；不得直接执行遗留测试源文件。
+- 集成和平台边界由相关 package 的行为测试覆盖；人工校验记录保存在任务生命周期产物中。
 - 项目尚未划分独立快速套件，RED 与 GREEN 验证使用 `go test ./...`；涉及并发、生命周期、代理或文件状态时追加竞态检测。
 
 ### 3. 覆盖率
