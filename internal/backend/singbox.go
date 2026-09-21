@@ -668,6 +668,10 @@ func (s *SingBox) probeOutbound(
 			ready = true
 			break
 		}
+		if probe.Status == dataplane.HealthStopped {
+			result.Status, result.Reason = dataplane.HealthUnhealthy, dataplane.CodeStart
+			return result, nil
+		}
 		select {
 		case <-ctx.Done():
 			return result, ctx.Err()

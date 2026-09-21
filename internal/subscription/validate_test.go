@@ -67,10 +67,29 @@ func TestValidateHysteria2NormalizesAndRejectsFields(t *testing.T) {
 	if len(ports) != 2 || ports[0] != "443:443" || ports[1] != "1000:1002" || internal["hop_interval"] != "5s" {
 		t.Fatalf("normalization mismatch: %#v", internal)
 	}
-	node.Extra = map[string]any{"mport": "443"}
-	if _, _, err := ValidateNodes([]model.Node{node}); err == nil ||
-		strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "obfs-secret") {
-		t.Fatalf("unsupported field accepted or leaked secret: %v", err)
+	obfs, ok := internal["obfs"].(map[string]any)
+	if !ok || obfs["type"] != "salamander" || obfs["password"] != "obfs-secret" {
+		t.Fatalf("obfs normalization mismatch: %#v", internal["obfs"])
+	}
+
+	for name, mutate := range map[string]func(*model.Node){
+		"unsupported mport":     func(node *model.Node) { node.Extra = map[string]any{"mport": "443"} },
+		"invalid ports range":   func(node *model.Node) { node.Ports = "1002-1000" },
+		"invalid ports type":    func(node *model.Node) { node.Ports = []string{"443"} },
+		"invalid hop interval":  func(node *model.Node) { node.HopInterval = "random" },
+		"obfs without password": func(node *model.Node) { node.ObfsPassword = nil },
+		"password without obfs": func(node *model.Node) { node.Obfs = nil },
+		"invalid obfs type":     func(node *model.Node) { node.Obfs = true },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := node
+			candidate.Extra = nil
+			mutate(&candidate)
+			_, _, err := ValidateNodes([]model.Node{candidate})
+			if err == nil || strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "obfs-secret") {
+				t.Fatalf("invalid Hysteria2 accepted or leaked secret: %v", err)
+			}
+		})
 	}
 }
 

@@ -4,8 +4,26 @@ Automated Go tests cover portable compatibility behavior. Before release, a
 maintainer must record the date, macOS version, Fleet commit, sing-box version,
 and result for each platform boundary below.
 
+Use one evidence record per run. Mark every item `pass`, `fail`, `skip`, or
+`not-run`; a skipped or unrun item is not release evidence.
+
+```text
+Date:
+macOS version / architecture:
+Fleet commit:
+Go version:
+sing-box version:
+Validation item:
+Command or action (sanitized):
+Result: pass | fail | skip | not-run
+Before/after process, proxy, interface, route, and DNS observations:
+Notes (no credentials or full configs):
+```
+
 - [ ] Keychain: add two subscriptions and confirm distinct `fleet.subscription.<UUID>` accounts.
 - [ ] Proxy: start, exercise an HTTPS request, inspect status, and stop.
+- [ ] Proxy log: while Proxy mode is active, confirm the instance-local
+      `sing-box.log` receives stdout/stderr and has permissions `0600`.
 - [ ] Proxy ownership: after proxy start, change one macOS proxy setting externally;
       stop Fleet and confirm the external setting is not overwritten.
 - [ ] TUN: start with administrator authorization, exercise traffic, inspect status, and stop.
@@ -18,7 +36,10 @@ and result for each platform boundary below.
       owned utun must carry the default or paired `/1` routes. Stop and verify the baseline again.
 - [ ] TUN cleanup: after stop, confirm the Fleet TUN interface, routes, and DNS
       changes are gone.
-- [ ] sing-box: validate vmess, hysteria2, anytls, and trojan nodes with the supported real binary.
+- [ ] sing-box config matrix: record `sing-box version`, then validate VMess,
+      Hysteria2, AnyTLS, and Trojan in both Proxy and TUN modes (eight results).
+      For Hysteria2, inspect the sanitized generated JSON and confirm Salamander
+      obfs, server port ranges, hop interval, ALPN, bandwidth, and TLS fields.
 - [ ] Runtime recovery: repeat proxy and TUN start with port occupation, denied
       sudo, interrupted startup, and a killed data-plane process; confirm Fleet
       either rolls back fully or reports a versioned `degraded` state without
@@ -31,6 +52,12 @@ and result for each platform boundary below.
       stopped or migrated.
 - [ ] Health isolation: compare the persistent PID, system proxy, TUN, routes,
       and DNS before and after `fleet health`; none may change.
+- [ ] Readiness versus health: make the temporary local mixed TCP port reachable
+      while forcing the proxied HTTPS request to fail. Confirm instance readiness
+      is reported separately and `fleet health` remains non-zero/unhealthy.
+- [ ] Health cleanup: repeat successful HTTPS, failed HTTPS, timeout/cancel, and
+      early sing-box exit. After each case confirm no health-probe PID, listener,
+      or `fleet-health-*` directory remains and the persistent runtime is unchanged.
 - [ ] Fresh install: run `scripts/install-local.sh`, then `fleet help`.
 - [ ] Go rollback: install over an earlier Go binary and exercise the printed rollback command.
 - [ ] Python retirement: install over a Python-shebang `fleet`; confirm it is archived and no rollback command restores it.

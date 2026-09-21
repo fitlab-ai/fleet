@@ -50,3 +50,21 @@
 | `SecureFileTests.test_secure_write_closes_fd_when_fdopen_fails` | `internal/store.TestAtomicJSONUsesSecureMode` | `unit` | `deterministic fixture` | `verified` | `go test ./internal/store -run '^TestAtomicJSONUsesSecureMode$'` |
 | `CliSecurityTests.test_url_validation_requires_https` | `internal/subscription.TestValidateURLRequiresHTTPSAndNoUserInfo` | `unit` | `deterministic fixture` | `verified` | `go test ./internal/subscription -run '^TestValidateURLRequiresHTTPSAndNoUserInfo$'` |
 | `CliSecurityTests.test_status_does_not_reveal_credential` | `internal/app.TestSubscriptionAddStoresNoSecretOnDisk` | `unit` | `deterministic fixture` | `verified` | `go test ./internal/app -run '^TestSubscriptionAddStoresNoSecretOnDisk$'` |
+
+## Current sing-box contract evidence
+
+These checks cover the current `DataPlane` contract rather than historical
+Python behavior, so they intentionally remain outside the historical ledger.
+
+- Exact adapter ID, capabilities, modes, protocols, resources, and unsupported
+  inputs: `go test ./internal/backend -run '^TestSingBoxDataPlaneContract$'`
+- Four protocols in Proxy and TUN modes, including artifact fields and decoded
+  JSON semantics: `go test ./internal/backend -run '^TestSingBoxRenderContractMatrix$'`
+- Real supported sing-box configuration matrix (records an explicit skip when
+  the binary is absent): `go test ./internal/backend -run '^TestProtocolModeConfigsAcceptedByInstalledSingBox$' -v`
+- TCP instance readiness and isolated HTTPS outbound behavior/cleanup:
+  `go test ./internal/backend -run '^TestSingBoxProbe(Instance|Outbound)Contract$'`
+- Runtime preflight side-effect ordering and status delegation:
+  `go test ./internal/runtime -run '^TestManager(RejectsUnsupportedCapabilityBeforeSideEffects|StatusUsesInstanceProbe)$'`
+- TCP reachability must not override failed proxy health:
+  `go test ./internal/app -run '^TestHealthDoesNotTreatTCPReachabilityAsProxyHealth$'`

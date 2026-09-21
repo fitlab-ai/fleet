@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/fitlab-ai/fleet/internal/model"
@@ -44,8 +45,54 @@ func TestHysteria2MapsConnectionOptions(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := cfg["outbounds"].([]any)[0].(map[string]any)
-	if out["hop_interval"] != "5s" || out["up_mbps"] != 10 {
+	tls := out["tls"].(map[string]any)
+	wantPorts := []string{"443:443", "1000:1002"}
+	wantObfs := map[string]any{"type": "salamander", "password": "o"}
+	if out["hop_interval"] != "5s" || out["up_mbps"] != 10 || out["down_mbps"] != 20 ||
+		!reflect.DeepEqual(out["server_ports"], wantPorts) || !reflect.DeepEqual(out["obfs"], wantObfs) ||
+		tls["enabled"] != true || tls["server_name"] != "example.com" ||
+		!reflect.DeepEqual(tls["alpn"], []string{"h3"}) {
 		t.Fatalf("missing options: %#v", out)
+	}
+}
+
+func TestProtocolModeConfigsAcceptedByInstalledSingBox(t *testing.T) {
+	binary, err := exec.LookPath("sing-box")
+	if err != nil {
+		t.Skip("sing-box is not installed")
+	}
+	version, err := exec.Command(binary, "version").CombinedOutput()
+	if err != nil {
+		t.Fatalf("sing-box version failed: %v\n%s", err, version)
+	}
+	t.Logf("integration binary: %s", string(version))
+	for _, node := range contractNodes() {
+		for _, mode := range []string{"proxy", "tun"} {
+			t.Run(node.Type+"/"+mode, func(t *testing.T) {
+				config, err := Export(node, mode, 7890)
+				if err != nil {
+					t.Fatal(err)
+				}
+				data, err := json.Marshal(config)
+				if err != nil {
+					t.Fatal(err)
+				}
+				path := filepath.Join(t.TempDir(), "config.json")
+				if err := os.WriteFile(path, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				command := exec.Command(binary, "check", "-c", path)
+				if mode == "tun" {
+					command.Env = append(os.Environ(),
+						"ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true",
+						"ENABLE_DEPRECATED_OUTBOUND_DNS_RULE_ITEM=true",
+					)
+				}
+				if output, err := command.CombinedOutput(); err != nil {
+					t.Fatalf("sing-box check failed: %v\n%s", err, output)
+				}
+			})
+		}
 	}
 }
 
