@@ -1,6 +1,10 @@
 # 实现报告模板
 
+> 写入本报告前，先用 `task-artifact init` 创建对应骨架，并保留每个 `artifact-section` marker；骨架不包含语义结果。
+
 创建 `code.md` 或 `code-r{N}.md` 时，使用以下结构。
+
+> “实现输入”字段用于读者追溯。生命周期身份以 `code.started` 冻结的输入和完成 receipt 为准，不从本报告正文解析。
 
 ## 输出模板
 
@@ -20,9 +24,29 @@
 - **裁决证据**：`{decision-evidence 或 N/A}`
 - **需求摘要**：{本轮实现输入的范围摘要}
 
-## 状态核对
+## 资格审计
 
-> 粘贴状态核对命令原文；每条命令以 `$ ` 开头。
+> 按 `.agents/rules/decision-qualification.md` 填写以下五张表。
+
+### 约束依赖
+| constraint_id | constraint_digest | role | evidence |
+| --- | --- | --- | --- |
+
+### 候选资格
+| candidate_id | status | impact | constraint_ids | evidence |
+| --- | --- | --- | --- | --- |
+
+### 分类结果
+| decision_id | classification | evidence |
+| --- | --- | --- |
+
+### 上游关系
+| upstream_family | upstream_artifact | upstream_round | upstream_sha256 | relation |
+| --- | --- | --- | --- | --- |
+
+### 依赖快照
+| task_input_digest | non_constraint_input_digest | upstream_artifact_digest |
+| --- | --- | --- |
 
 ## 变更文件
 
@@ -58,16 +82,6 @@
 ```
 
 
-## 证据原文
-
-> 每条“我验证了 X”断言都要配对对应 tool output 原文；gate 仅校验本段存在和至少一行 `$ `。
-
-- 断言：{verified claim}
-```text
-$ {command}
-{raw output}
-```
-
 ## 与方案的差异
 
 {describe any deviation from the approved plan}
@@ -85,6 +99,30 @@ $ {command}
 **建议审查者重点关注**:
 - {item 1}
 - {item 2}
+
+## 状态核对
+
+> 记录状态核对命令、任务/产物范围、关键结果和未覆盖部分；每条命令以 `$ ` 开头。
+> 按 `.agents/rules/evidence-reporting.md` 同时记录任务/产物范围、关键结果和未覆盖部分；正常成功不粘贴完整 stdout。
+
+必须记录至少一条实际执行的 `$ ` 命令及其结果摘要，不能只写自然语言状态。实现阶段通常包括：
+
+```text
+$ agent-infra-internal task-snapshot {task-id} --format text
+{任务状态、实现产物范围和未覆盖项摘要}
+$ agent-infra-internal task-artifact {task-id} inspect --family code
+{code artifact、上游输入和下一步摘要}
+```
+
+## 证据原文
+
+> 遵循 `.agents/rules/evidence-reporting.md`：每条断言配对 `$ ` 命令和相称结果摘要；仅为失败、阻塞或争议附决定性原文摘录。
+
+- 断言：{verified claim}
+```text
+$ {command}
+{result summary or decisive excerpt}
+```
 
 ## 已知问题
 

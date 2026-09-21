@@ -9,16 +9,22 @@ description: >
 # 编码任务
 > `--agent` 取值见 `.agents/rules/task-management.md`「合作者 token 规范」。
 
-若入口业务操作数包含 `--orchestrated`，绑定 `{execution-flag}` = `--orchestrated` 并原样转发给 completed 事件；否则绑定为空。不得从 `orchestration.json`、环境变量或历史产物推断该标记。
+若入口业务操作数包含 `--orchestrated`，绑定 `{execution-flag}` = `--orchestrated` 并原样转发给 completed 事件；否则绑定为空。不得从 `orchestration.json`、环境变量或历史产物推断该标记。生命周期事件还必须携带显式触发信息：编排调用使用 `{trigger-initiator}=orchestrator`，否则使用 `model`；`{request-id}` 是本任务与本轮产物的稳定单行标识，`{reason-code}` 初次实现使用 `user-request`，修复或裁决使用 `review-finding`；started 与 completed 使用同一组值。
 
 根据已批准的技术方案编码任务，并产出 `code.md` 或 `code-r{N}.md`。本技能支持初次实现、基于 `review-code` 反馈的修复，以及人工裁决驱动实现三种模式。
 
 ## 行为边界 / 关键规则
 
+### 持久化报告证据
+
+生成实现报告时，先读取 `.agents/rules/evidence-reporting.md`。成功测试记录命令、目标范围、状态/结构化结果、实际结果和未覆盖部分；失败、阻塞或争议保留复现入口、准确位置和决定性摘录，不默认粘贴完整成功 stdout。
+
+- 涉及候选资格或 `HD-N` 判断时，先读取 `.agents/rules/decision-qualification.md`，基于 task.md 规范化约束/候选完成资格审计，并在实现报告记录五张资格审计表；不得把来源不明或未确认约束自动升级为排除条件
 - 严格遵循最新方案产物：`plan.md` 或 `plan-r{N}.md`
 - 生成会同步到 Issue 的任务或生命周期 Markdown 前，先读取 `.agents/rules/sync-content-generation.md` 并遵循其中的生成端约束；同步端不解析或改写正文
 - 实现前读取 `.agents/rules/compatibility-policy.md`；只实现方案明确批准的兼容预算，不以“稳妥”为由保留旧分支、旧结果契约或迁移 shim
 - 修复模式逐条核实最新 `review-code` 的发现：成立则修复，判定为不成立/幻觉则在报告中反驳并记入 unresolved；不擅自扩大到审查未列出的问题；manual-validation 项不在修复范围
+- 实现报告在 checkpoint、账本和 `code.completed` 前必须先通过 `task-artifact ... preflight --family code`；preflight 只验证并封存 generation，不发布 formal/task/ledger/platform 状态。随后 `finalize-local` 才发布同一次通过的 digest。
 - 实现中遇到方案未覆盖的关键设计决策时，先调用 `agent-infra-internal task-ledger {task-id} decision-next-id` 取得 `HD-N`，按 `.agents/rules/human-decision-context.md` 写入实现报告的 `## 人工裁决待办` 详情块并判断是否需要实现，再调用 `decision-upsert --id {HD-N} --stage code --artifact {code-artifact} --needs-implementation {true|false}`；不得扫描编号、手写账本行、中途提问或擅自扩范围
 - 不调用 `commit` 技能，也不推送远端；测试通过后直接调用共享 commit core 的 `delivery: { mode: 'local' }` 创建本地 checkpoint。checkpoint 使用 durable intent，只有 checkpoint 与 task 状态同步成功后才发送 `code.completed`
 - 每轮实现都创建新的实现产物，不覆盖旧文件
@@ -43,7 +49,7 @@ description: >
 
 在加载 workflow / skill / rules 指令之后、做任何任务状态判断或用户可见结论之前，必须先执行状态核对。指令类文件读取不算对外动作或结论。
 
-运行以下命令，并把原文粘贴到本轮产物的 `## 状态核对` 段：
+运行以下命令，并在本轮产物的 `## 状态核对` 段记录任务/产物范围、关键结果和未覆盖部分；正常成功不粘贴完整目录清单或 `task.md` 尾部。失败、阻塞、身份不一致或争议时，附决定性原文行：
 
 ```bash
 agent-infra-internal task-snapshot {task-id} --format text
@@ -59,7 +65,7 @@ agent-infra-internal task-snapshot {task-id} --format text
 
 ## 步骤开始：声明 started 事件
 
-确认前置条件与模式后、本轮第一个产出动作之前执行 `agent-infra-internal task-event {task-id} code.started --agent {standard-agent-token}`。修复模式追加 `--fix-for {review-artifact}`，裁决模式追加 `--implementation-input {input-id}`。核心根据 artifact context 推导并校验轮次与输入身份；以返回的 `artifactContext` 记录本轮身份。
+确认前置条件与模式后、本轮第一个产出动作之前执行 `agent-infra-internal task-event {task-id} code.started --agent {standard-agent-token} --initiator {trigger-initiator} --request-id {request-id} --reason-code {reason-code}`。修复模式追加 `--fix-for {review-artifact}`，裁决模式追加 `--implementation-input {input-id}`。核心根据 artifact context 推导并校验轮次与输入身份；以返回的 `artifactContext` 记录本轮身份。
 
 ## 执行步骤
 ### 1. 验证前置条件
@@ -85,9 +91,9 @@ agent-infra-internal task-snapshot {task-id} --format text
 
 ### 3. 收窄里程碑
 
-**必须执行，不得跳过。** 如果 task.md 中存在有效的 `issue_number`，调用 `agent-infra-internal platform-issue sync {task-id} --agent {standard-agent-token} --milestone specific`；里程碑推断、权限降级与幂等写入由 internal core 处理。
+**必须执行，不得跳过。** 如果 task.md 中存在有效的 `platform_issue_identity`，调用 `agent-infra-internal platform-issue sync {task-id} --agent {standard-agent-token} --milestone specific`；里程碑推断、权限降级与幂等写入由 internal core 处理。
 
-> 若跳过或收窄后仍为 `X.Y.x`，步骤 11 的 `task-verify code.completed` 会通过 typed milestone check 截停本轮。
+> 若跳过或收窄后仍为 `X.Y.x`，步骤 12 的 `task-verify code.completed` 会通过 typed milestone check 截停本轮。
 
 ### 4. 确定模式与轮次
 
@@ -142,32 +148,58 @@ echo "$result"
 
 如果测试失败，先尝试修复并重新运行测试。只有在确认存在外部阻塞、环境缺失或需求不明确且超出任务范围时，才可以停止。
 
-测试通过后，通过 `agent-infra-internal git-workflow commit --input {checkpoint-input}` 调用共享 commit core，输入 `delivery: { "mode": "local" }`、明确 paths、expected HEAD/tree、task ref、agent 和 code round。该调用只创建本地 checkpoint，不访问远端；core 会在 commit 前写入 durable intent，并在 task writer 成功后清理 intent。checkpoint 失败或 task 状态未闭合时，不得发送 `code.completed`。
+测试通过后，先创建报告并运行 `task-artifact {task-id} preflight --family code --artifact {code-artifact}`；preflight 失败只允许在同一受控 candidate 中修复并完整重跑，且不得产生 checkpoint、ledger、completed 或平台副作用。preflight 通过后，才通过 `agent-infra-internal git-workflow commit --input {checkpoint-input}` 调用共享 commit core，输入 `delivery: { "mode": "local" }`、明确 paths、expected HEAD/tree、task ref、agent 和 code round。该调用只创建本地 checkpoint，不访问远端；core 会在 commit 前写入 durable intent，并在 task writer 成功后清理 intent。checkpoint 失败或 task 状态未闭合时，不得发送 `code.completed`。
+
+checkpoint 成功后，若任务存在 `platform_issue_identity`，调用 `agent-infra-internal platform-issue sync {task-id} --agent {standard-agent-token} --in-labels from-diff --base {delivery-base-ref}`，由 task-bound `delivery_base_ref` 产生 Issue 的 `in:` target；该同步失败时记录 warning 并停止本轮，不发送 `code.completed`。
 
 排查测试失败或行为不符合预期时，先读取 `.agents/rules/debugging-guide.md`，按其四阶段流程定位根因，禁止盲目改代码重试。
 
 ### 9. 编写实现报告
 
+在首次写入本轮 `{code-artifact}` 前，先创建受控报告骨架：
+
+```bash
+agent-infra-internal task-artifact {task-id} init --family code --artifact {code-artifact}
+```
+
+骨架只包含身份元数据、稳定 section marker 和必需标题；必须填入真实实现与验证内容后才能通过完成门禁。preflight 或 finalizer 返回结构错误时，按 `.agents/rules/local-artifact-repair.md` 直接修正正式产物并重跑原入口；当前结构、资格和摘要事实是唯一门禁。
+
 创建 `.agents/workspace/active/{task-id}/{code-artifact}`。
 
 > 报告结构、必填章节和完整模板见 `reference/report-template.md`。写报告前先读取 `reference/report-template.md`。
 
-### 10. 更新任务状态
+### 10. 报告完成前门禁
+
+报告写入后、发布 `code.completed` 前，读取并遵循 `.agents/rules/local-artifact-repair.md`，执行：
+
+```bash
+finalizer=$(agent-infra-internal task-artifact {task-id} finalize-local --family code --artifact {code-artifact})
+status=$?
+echo "$finalizer"
+```
+
+- `status=0` 且 `finalizer.status="passed"`：绑定这一次返回的 `{artifact-sha256}` 和 `{semantic-digest}`。
+- `status=1`：直接修正正式产物后重跑同一入口；preflight 失败必须重跑 preflight，finalizer 失败必须重跑 finalizer。若仍失败且当前诊断未解决，继续下一轮。
+- 其他失败、formal artifact 外部变化、无法安全修复、诊断或指纹重复、无进展或达到共享规则的编辑上限：停止，不发布 `code.completed`。
+
+不得重新扫描或手工补写摘要；完成事件必须携带本次 `passed` 结果的 `--artifact-sha256 {artifact-sha256} --semantic-digest {semantic-digest}`。
+
+### 11. 更新任务状态
 
 更新 `.agents/workspace/active/{task-id}/task.md`：
 - 审查 `## 需求` 段落，仅把本轮已由代码实现且有测试通过支撑的条目从 `- [ ]` 勾为 `- [x]`
 - 产物链接、阶段与完成日志由 completed 事件统一登记
 - 完成业务内容更新后声明完成事件：
-  - 初次实现：`agent-infra-internal task-event {task-id} code.completed --agent {standard-agent-token} --artifact {code-artifact} --files-modified {n} --tests-passed {n} {execution-flag}`
-  - 修复模式：`agent-infra-internal task-event {task-id} code.completed --agent {standard-agent-token} --artifact {code-artifact} --fix-for {review-artifact} --blockers {n} --major {n} --minor {n} --manual-validation {n} {execution-flag}`
-  - 裁决模式：`agent-infra-internal task-event {task-id} code.completed --agent {standard-agent-token} --artifact {code-artifact} --implementation-input {input-id} --files-modified {n} --tests-passed {n} {execution-flag}`
+  - 初次实现：`agent-infra-internal task-event {task-id} code.completed --agent {standard-agent-token} --initiator {trigger-initiator} --request-id {request-id} --reason-code {reason-code} --artifact {code-artifact} --artifact-sha256 {artifact-sha256} --semantic-digest {semantic-digest} --files-modified {n} --tests-passed {n} {execution-flag}`
+  - 修复模式：`agent-infra-internal task-event {task-id} code.completed --agent {standard-agent-token} --initiator {trigger-initiator} --request-id {request-id} --reason-code {reason-code} --artifact {code-artifact} --artifact-sha256 {artifact-sha256} --semantic-digest {semantic-digest} --fix-for {review-artifact} --blockers {n} --major {n} --minor {n} --manual-validation {n} {execution-flag}`
+  - 裁决模式：`agent-infra-internal task-event {task-id} code.completed --agent {standard-agent-token} --initiator {trigger-initiator} --request-id {request-id} --reason-code {reason-code} --artifact {code-artifact} --artifact-sha256 {artifact-sha256} --semantic-digest {semantic-digest} --implementation-input {input-id} --files-modified {n} --tests-passed {n} {execution-flag}`
 
-如果 task.md 中存在有效的 `issue_number`，执行以下同步操作（任一失败则记录 warning 并继续；Issue 元数据边界仍见 `.agents/rules/issue-sync.md`）：
+如果 task.md 中存在有效的 `platform_issue_identity`，执行以下同步操作（状态/评论失败按规则记录 warning；Issue `in:` evidence 同步失败不得发送 `code.completed`；边界见 `.agents/rules/issue-sync.md`）：
 - 调用 `agent-infra-internal platform-issue sync {task-id} --agent {standard-agent-token} --status in-progress`
 - 调用 `agent-infra-internal platform-comment sync {task-id} --kind task --agent {standard-agent-token}`
 - 调用 `agent-infra-internal platform-comment sync {task-id} --kind artifact --artifact {code-artifact} --agent {standard-agent-token}`
 
-### 11. 完成校验
+### 12. 完成校验
 
 运行完成校验，确认任务产物和同步状态符合规范：
 
@@ -182,7 +214,7 @@ agent-infra-internal task-verify {task-id} code.completed --artifact {code-artif
 
 将校验输出保留在回复中作为当次验证输出。没有当次校验输出，不得声明完成。
 
-### 12. 告知用户
+### 13. 告知用户
 
 > 仅在校验通过后执行本步骤。
 

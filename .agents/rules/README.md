@@ -12,7 +12,9 @@
 - [`version-stamp.md`](version-stamp.md) — `agent_infra_version` 版本戳的取值命令与写入时机。
 - [`debugging-guide.md`](debugging-guide.md) — 结构化调试流程：收集证据→形成假设→验证假设→修复根因，禁止盲目改代码重试。
 - [`compatibility-policy.md`](compatibility-policy.md) — 兼容性默认关闭：准入证据、实现边界、退出条件与生命周期审查要求。
+- [`evidence-reporting.md`](evidence-reporting.md) — 生命周期报告的状态核对、成功摘要、异常证据、身份字段和敏感信息边界。
 - [`sync-content-generation.md`](sync-content-generation.md) — 同步到 Issue 的任务和生命周期 Markdown 生成约束。
+- [`decision-qualification.md`](decision-qualification.md) — 约束、候选、人工确认和六类 artifact 资格审计契约。
 
 ## Issue / PR
 
@@ -29,7 +31,7 @@
 - [`lifecycle-orchestration.md`](lifecycle-orchestration.md) — `run-task` 的 fresh executor/reviewer、一次性 receipt、暂停恢复与安全终点规则。
 - [`review-handshake.md`](review-handshake.md) — 三阶段双向审查握手协议：四态处置、对称证据、分歧账本、收敛与 post-review commit 门禁。
 - [`review-method.md`](review-method.md) — 三阶段共享检视方法：多遍检视、风险镜头、追踪与 finding 证据契约。
-- [`local-artifact-repair.md`](local-artifact-repair.md) — review artifact 失败后的模型逐例修复、机械安全门、动态收敛与结果输出契约。
+- [`local-artifact-repair.md`](local-artifact-repair.md) — analysis/plan/code completed 前的本地产物校验、review artifact 失败后的模型逐例修复、机械安全门与收敛契约。
 - [`human-decision-context.md`](human-decision-context.md) — 新建人工裁决详情的自足上下文与规范结构。
 - [`task-short-id.md`](task-short-id.md) — 裸数字任务短号的解析、分配与生命周期。
 - [`milestone-inference.md`](milestone-inference.md) — create-task / code-task / create-pr 的 milestone 推断。

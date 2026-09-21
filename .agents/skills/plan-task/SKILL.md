@@ -9,10 +9,15 @@ description: >
 # 设计技术方案
 > `--agent` 取值见 `.agents/rules/task-management.md`「合作者 token 规范」。
 
-若入口业务操作数包含 `--orchestrated`，绑定 `{execution-flag}` = `--orchestrated` 并原样转发给 completed 事件；否则绑定为空。不得从 `orchestration.json`、环境变量或历史产物推断该标记。
+若入口业务操作数包含 `--orchestrated`，绑定 `{execution-flag}` = `--orchestrated` 并原样转发给 completed 事件；否则绑定为空。不得从 `orchestration.json`、环境变量或历史产物推断该标记。生命周期事件还必须携带显式触发信息：编排调用使用 `{trigger-initiator}=orchestrator`，否则使用 `model`；`{request-id}` 是本任务与本轮产物的稳定单行标识，`{reason-code}` 使用 `user-request`、`new-requirement` 或 `upstream-fact-doubt`；started 与 completed 使用同一组值。
 
 ## 行为边界 / 关键规则
 
+### 持久化报告证据
+
+生成方案报告时，先读取 `.agents/rules/evidence-reporting.md`。状态核对和验证记录命令、目标范围、状态/结构化结果、实际结果和未覆盖部分；失败、阻塞或争议才附决定性原文摘录。
+
+- 涉及候选资格或 `HD-N` 判断时，先读取 `.agents/rules/decision-qualification.md`，基于 task.md 规范化约束/候选完成资格审计，并在方案产物记录五张资格审计表；不得把来源不明或未确认约束自动升级为排除条件
 - 本技能仅产出技术方案文档（`plan.md` 或 `plan-r{N}.md`）—— 不修改任何业务代码
 - 生成会同步到 Issue 的任务或生命周期 Markdown 前，先读取 `.agents/rules/sync-content-generation.md` 并遵循其中的生成端约束；同步端不解析或改写正文
 - 这是一个**强制性的人工审查检查点** —— 不要自动进入实现阶段
@@ -25,7 +30,7 @@ description: >
 
 在加载 workflow / skill / rules 指令之后、做任何任务状态判断或用户可见结论之前，必须先执行状态核对。指令类文件读取不算对外动作或结论。
 
-运行以下命令，并把原文粘贴到本轮产物的 `## 状态核对` 段：
+运行以下命令，并在本轮产物的 `## 状态核对` 段记录任务/产物范围、关键结果和未覆盖部分；正常成功不粘贴完整目录清单或 `task.md` 尾部。失败、阻塞、身份不一致或争议时，附决定性原文行：
 
 ```bash
 agent-infra-internal task-snapshot {task-id} --format text
@@ -44,7 +49,7 @@ agent-infra-internal task-snapshot {task-id} --format text
 确认前置条件和轮次后、本轮第一个产出动作之前执行：
 
 ```bash
-agent-infra-internal task-event {task-id} plan.started --agent {standard-agent-token}
+agent-infra-internal task-event {task-id} plan.started --agent {standard-agent-token} --initiator {trigger-initiator} --request-id {request-id} --reason-code {reason-code}
 ```
 
 ## 执行步骤
@@ -83,6 +88,8 @@ agent-infra-internal task-event {task-id} plan.started --agent {standard-agent-t
 
 ### 5. 设计技术方案
 
+方案必须按 `.agents/rules/decision-qualification.md` 复核规范化约束和候选，并在方案产物保留五张资格审计表及真实上游关系；来源不明或未人工确认的约束不得自动排除候选。
+
 遵循 `.agents/workflows/feature-development.yaml` 中的 `technical-design` 步骤：
 
 **必要任务**：
@@ -104,6 +111,14 @@ agent-infra-internal task-event {task-id} plan.started --agent {standard-agent-t
 
 ### 6. 输出计划文档
 
+在首次写入本轮 `{plan-artifact}` 前，先创建受控报告骨架：
+
+```bash
+agent-infra-internal task-artifact {task-id} init --family plan --artifact {plan-artifact}
+```
+
+骨架只包含身份元数据、稳定 section marker 和必需标题；必须填入真实方案内容后才能通过完成门禁。finalizer 返回结构错误时，直接修正正式产物后重跑 `task-artifact {task-id} finalize-local --family plan --artifact {plan-artifact}`；当前结构、资格和摘要事实是唯一门禁。
+
 创建 `.agents/workspace/active/{task-id}/{plan-artifact}`。
 
 ### 7. 更新任务状态
@@ -114,9 +129,16 @@ agent-infra-internal task-event {task-id} plan.started --agent {standard-agent-t
   - 用新值覆盖 frontmatter 的 `effort` 字段
   - 在本轮方案产物 `{plan-artifact}` 中追加 `## 工作量重估` 段，记录一条：`effort {old} → {new} (rationale: {基于本轮方案的简短依据})`
   若重估值与当前值一致，跳过：不写入 `## 工作量重估` 段。后续 Flow A 同步会读取可能更新过的 frontmatter，并自动把新值同步到 Issue。
-- 完成业务内容更新后执行 `agent-infra-internal task-event {task-id} plan.completed --agent {standard-agent-token} --artifact {plan-artifact} {execution-flag}`，由核心原子登记链接、阶段、代理、时间、版本和 Activity Log。
+- 完成本地产物后，先执行本地完成前门禁：
+  ```bash
+  agent-infra-internal task-artifact {task-id} finalize-local --family plan --artifact {plan-artifact}
+  ```
+  - `status=passed`：保存本次返回的 `artifactSha256` 和 `semanticDigest`；finalizer 已记录对应的一次性本地 provenance intent。
+  - `status=failed`：直接修正正式产物并完整重跑 finalizer；若仍失败且诊断未解决，继续下一轮。
+  - 当前正式产物发生外部变化、无法安全修复、诊断或指纹重复、无进展，或达到共享规则的编辑上限时停止，不发布 completed 事件。
+- 使用同一次 `status=passed` 返回的摘要执行 `agent-infra-internal task-event {task-id} plan.completed --agent {standard-agent-token} --initiator {trigger-initiator} --request-id {request-id} --reason-code {reason-code} --artifact {plan-artifact} --artifact-sha256 {artifact-sha256} --semantic-digest {semantic-digest} {execution-flag}`，由核心登记链接、阶段、代理、时间、版本和 Activity Log。
 
-如果 task.md 中存在有效的 `issue_number`，执行以下同步操作（任一失败则跳过并继续）：
+如果 task.md 中存在有效的 `platform_issue_identity`，执行以下同步操作（任一失败则跳过并继续）：
 - 调用 `agent-infra-internal platform-issue sync {task-id} --agent {standard-agent-token} --status pending-design-work --fields`
 - 调用 `agent-infra-internal platform-comment sync {task-id} --kind task --agent {standard-agent-token}`
 - 调用 `agent-infra-internal platform-comment sync {task-id} --kind artifact --artifact {plan-artifact} --agent {standard-agent-token}`

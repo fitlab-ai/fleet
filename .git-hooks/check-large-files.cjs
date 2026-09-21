@@ -1,4 +1,4 @@
-#!/opt/homebrew/opt/node/bin/node
+#!/usr/bin/env node
 
 const fs = require("node:fs");
 const path = require("node:path");

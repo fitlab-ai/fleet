@@ -11,20 +11,14 @@
 当正向断言已覆盖期望行为，就不要再为"反面不应出现"补一条反向断言。
 
 ❌ 反例：
-```go
-if got != want {
-	t.Fatalf("got %q, want %q", got, want)
-}
-if got == "legacy-value" {
-	t.Fatal("legacy value must not appear") // 多余：永久记住一个已删除值
-}
+```ts
+assert.match(content, /^name: code-task$/m);         // 正向已覆盖期望值
+assert.doesNotMatch(content, /^name: wrong-name$/m); // 多余：永久记住一个不该出现的值
 ```
 
 ✅ 正例：
-```go
-if got != want {
-	t.Fatalf("got %q, want %q", got, want)
-}
+```ts
+assert.match(content, /^name: code-task$/m);         // 正向断言已足够
 ```
 
 正向断言通过即证明值正确；额外的反向断言不增加保护，只增加维护成本，并会在功能删除后退化为"测试永久记住一个不再存在的概念"。
@@ -47,19 +41,28 @@ if got != want {
 
 ## 项目级测试策略
 
-仓库特定的命令、目录约定、覆盖率阈值、CI 集成和报告服务应记录在项目自己的测试文档中。新增测试前先读取该策略，并按测试的可观察范围与运行成本选择对应层级。
+新增测试前先读取以下策略，并按测试的可观察范围与运行成本选择对应层级。
 
-如果项目没有定义分层测试套件，RED 与 GREEN 验证都使用项目的完整测试命令。不要在无关改动中自行引入测试层级或覆盖率门禁。
+### 1. 测试命令
 
-### Go 项目约定
+完整验证依次运行：
+
+```bash
+go build -trimpath -o dist/fleet ./cmd/fleet
+go vet ./...
+go test ./...
+go test -race ./...
+```
+
+开发期间可使用 `go test ./...`；跨 package 的迁移兼容性检查使用 `go test ./tests/compat/...`。
+
+### 2. 测试目录或层级
 
 - 测试文件与被测 package 放在同一目录，命名为 `*_test.go`。
-- 跨 package 的迁移兼容性检查放在 `tests/compat`。
-- 默认完整验证使用 `go test ./...`；涉及并发、生命周期、代理或文件状态时追加 `go test -race ./...`。
-- 静态检查使用 `go vet ./...`，构建验证使用 `go build -trimpath -o dist/fleet ./cmd/fleet`。
-- 不执行遗留测试源文件；它们只可作为迁移兼容性矩阵的数据来源，直到迁移清理任务明确删除。
+- 跨 package 的迁移兼容性检查放在 `tests/compat`；不得直接执行遗留测试源文件。
+- 项目尚未划分独立快速套件，RED 与 GREEN 验证使用 `go test ./...`；涉及并发、生命周期、代理或文件状态时追加竞态检测。
 
-### 覆盖率定位（信息层）
+### 3. 覆盖率
 
 需要定位未覆盖代码时可运行：
 
@@ -69,3 +72,11 @@ go tool cover -func=coverage.out
 ```
 
 覆盖率用于发现薄弱区域，不作为单独的合并门禁。`coverage.out` 是本地产物，不应提交。
+
+### 4. 持续集成
+
+`.github/workflows/ci.yml` 的 `go-test` 依次执行构建、`go vet ./...`、`go test ./...` 与 `go test -race ./...`；这些检查均为阻塞项。
+
+### 5. 报告服务
+
+目前没有配置外部测试报告服务或徽章；构建产物和覆盖率文件均不影响验收。

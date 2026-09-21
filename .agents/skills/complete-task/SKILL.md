@@ -9,10 +9,14 @@ description: >
 # 完成任务
 > `--agent` 取值见 `.agents/rules/task-management.md`「合作者 token 规范」。
 
-宿主 finalization 使用 receipt v2（不可变 `receiptId`、单调 `revision` 和 canonical warnings）。生命周期/身份/required PR 等硬失败返回 `result: failed|blocked`；生命周期完成后，评论、外围验证和其他同步失败返回 `result: completed_with_warnings` 及六字段 warning，并仅重试 receipt 中的 pending step。
+宿主 finalization 使用 receipt v3（不可变 `receiptId`、单调 `revision`、摘要暂存和 canonical warnings）。生命周期/身份/required PR 等硬失败返回 `result: failed|blocked`；生命周期完成后，评论、外围验证和其他同步失败返回 `result: completed_with_warnings` 及六字段 warning，并仅重试 receipt 中的 pending step。
 
 
 ## 行为边界 / 关键规则
+
+### 持久化报告证据
+
+生成收尾报告或同步内容时，先读取 `.agents/rules/evidence-reporting.md`。成功检查记录命令、范围、状态/结构化结果、实际结果和未覆盖部分；失败、阻塞或争议保留复现入口、准确位置和决定性摘录。
 
 - 本命令更新任务元数据并物理移动任务目录
 - 除非强制执行，不要转移有未完成工作流步骤的任务
@@ -24,7 +28,7 @@ description: >
 
 在加载 workflow / skill / rules 指令之后、做任何任务状态判断或用户可见结论之前，必须先执行状态核对。指令类文件读取不算对外动作或结论。
 
-运行以下命令，并把原文粘贴到本轮产物的 `## 状态核对` 段：
+运行以下命令，并在本轮产物的 `## 状态核对` 段记录任务/产物范围、关键结果和未覆盖部分；正常成功不粘贴完整目录清单或 `task.md` 尾部。失败、阻塞、身份不一致或争议时，附决定性原文行：
 
 ```bash
 agent-infra-internal task-snapshot {task-id} --format text
@@ -54,7 +58,7 @@ agent-infra-internal task-snapshot {task-id} --format text
 - 如果在 `completed/` 但缺少匹配日志：告知用户任务已完成但终态身份不完整并停止，不手工修补
 - 如果在 `blocked/`：告知用户任务被阻塞；建议先解除阻塞
 
-场景 A 为 active 任务的正常完成路径；场景 B `finalization-retry` 只重试归档后的 task 评论与终态门禁。
+场景 A 为 active 任务的正常完成路径；场景 B `finalization-retry` 重试允许的 artifact 回填、终态 task 评论、完成校验和摘要封口，不回迁生命周期。
 
 ### 2. 验证完成前置条件（未满足则必须停止）
 
@@ -86,20 +90,20 @@ agent-infra-internal platform-pr resolve-external {task-id} --agent {standard-ag
 缺省 + `pending` 的二选一引导消息：
 ```
 任务 {task-id} 尚未决定 PR 交付（pr_delivery_fact: unbound）。请二选一：
-  - 走 PR 流程：/create-pr {task-ref}
-  - 显式跳过并完成：/complete-task {task-ref} --skip-pr
+  - 走 PR 流程：/create-pr --task {task-ref}
+  - 显式跳过并完成：/complete-task --task {task-ref} --skip-pr
 ```
 
 `required` + `pending`/`skipped` 的停止消息：
 ```
 当前项目强制 PR 流程（prFlow: "required"），任务尚未创建 PR。
-请先运行 /create-pr {task-ref} 创建 PR 后再完成；--skip-pr 在强制 PR 下不被接受。
+请先运行 /create-pr --task {task-ref} 创建 PR 后再完成；--skip-pr 在强制 PR 下不被接受。
 ```
 
 生命周期前只验证硬门禁：
 - [ ] task 身份、active 状态、并发锁和本地原子生命周期操作可用
 - [ ] `prFlow=required` 时已满足 required-PR delivery
-- [ ] 其余业务证据（工作流、审查、提交、测试、分歧账本、人工校验和平台同步）已记录或可在生命周期后校验
+- [ ] 其余业务证据（工作流、审查、提交、测试、分歧账本、人工校验和平台同步）已记录或可在生命周期后校验；人工验证只能由 committed transaction、receipt、当前 artifact 摘要和带 identity 的通过日志满足
 
 > **⚠️ 前置条件分支判断 — 你必须先判断“继续”还是“停止”：**
 >
@@ -122,7 +126,7 @@ Please satisfy the hard prerequisite first, then retry complete-task.
 ### 3. 完成业务内容更新
 
 在 `.agents/workspace/active/{task-id}/task.md` 中只更新生命周期核心不负责的业务内容：
-- 新增或更新 `## 状态核对` 段，粘贴第 0 步审计命令原文（含 `$ ` 前缀行），放在 `## 活动日志` 之前
+- 新增或更新 `## 状态核对` 段，记录第 0 步审计命令、任务/产物范围、关键结果和未覆盖部分；正常成功不复制完整目录清单或 `task.md` 尾部，失败、阻塞、身份不一致或争议时附决定性原文行，放在 `## 活动日志` 之前
 - 标记所有工作流步骤为已完成
 - 逐项验证并勾选 `## 完成检查清单` 中的所有条目（将 `- [ ]` 改为 `- [x]`）
 
@@ -130,15 +134,14 @@ Please satisfy the hard prerequisite first, then retry complete-task.
 
 ### 4. 在 active 阶段同步平台
 
-检查 `task.md` 中是否存在有效的 `issue_number`。如果没有，跳过本步骤且不输出任何内容。
+检查 `task.md` 中是否存在有效的 `platform_issue_identity`。如果没有，跳过本步骤且不输出任何内容。
 
 > Issue 元数据边界见 `.agents/rules/issue-sync.md`；评论同步统一调用 internal platform intent。
 
-如果存在有效的 `issue_number`，严格按以下顺序执行：
+如果存在有效的 `platform_issue_identity`，严格按以下顺序执行：
 
-1. 调用 `agent-infra-internal platform-comment backfill {task-id} --agent {standard-agent-token}`，由 core 仅按 completion canonical inventory 固定顺序补发产物并在全部成功后精确恢复目标历史告警。
-2. 调用 `agent-infra-internal platform-issue sync {task-id} --agent {standard-agent-token} --requirements --fields`。
-3. 把业务摘要写入临时文件，并调用 `agent-infra-internal platform-comment sync {task-id} --kind summary --body-file {path} --agent {standard-agent-token}`。
+1. 调用 `agent-infra-internal platform-issue sync {task-id} --agent {standard-agent-token} --requirements --fields`。
+2. 把业务摘要写入临时文件，并调用 `agent-infra-internal platform-comment stage-summary {task-id} --body-file {path}`。该命令把正文和 SHA-256 写入 task 目录的 durable staging record；本步骤不得直接发布 summary 评论。
 
 若账本含合法的 `PRC-N` post-review 豁免，摘要正文必须镜像 task.md 中的裁决理由、提交范围、人工身份与时间，并明确这是人工覆盖而非自动校验成功。已有匹配 workflow warning 时，同时镜像其原始 failure code/message；尚无 warning 时只写“裁决已记录、最终门禁待验证”，不得提前宣称豁免已通过。summary marker 仍由同一 `--kind summary` intent 唯一维护。
 
@@ -147,7 +150,7 @@ Please satisfy the hard prerequisite first, then retry complete-task.
 任一操作失败时，任务仍必须位于 active 且短号仍有效；按失败类型调用以下结构化 warning intent，随后继续步骤 5。平台失败不会阻止本地生命周期。
 
 ```bash
-agent-infra-internal task-warning {task-id} add --step complete-task --severity ACTION_REQUIRED --code {COMMENT_SYNC_FAILED|REQUIREMENTS_SYNC_FAILED|SUMMARY_SYNC_FAILED|NETWORK_RETRY_EXHAUSTED} --target {artifact|issue|summary|platform} --message "{error_code}: {error_message}" --action "修复平台同步问题后重跑 complete-task"
+agent-infra-internal task-warning {task-id} add --step complete-task --severity ACTION_REQUIRED --code {REQUIREMENTS_SYNC_FAILED|SUMMARY_SYNC_FAILED|NETWORK_RETRY_EXHAUSTED} --target {issue|summary|platform} --message "{error_code}: {error_message}" --action "修复平台同步问题后重跑 complete-task"
 ```
 
 相同 `step/code/target` 组合由核心幂等去重；调用方不分配 warning id 或手写账本行。
@@ -166,36 +169,36 @@ agent-infra-internal task-verify {task-id} complete-task.preflight --format text
 
 `--force` 不能解除身份、并发、本地原子性或 required-PR hard gate；这些能力失败时必须停止。其余审查、人工校验和平台证据由 terminal verification 记录为 warning/pending，并通过后续重试恢复。
 
-### 6. 执行宿主 finalization 入口并验证终态
+### 6. 执行宿主 finalization 入口
 
 ```bash
 agent-infra-internal task-finalization {task-id} complete --agent {standard-agent-token}
 ```
 
-finalization 按 lifecycle → task 评论 → `complete-task.completed` 校验的固定顺序执行，并将每一步的状态写入宿主 receipt。`result=completed` 即表示 lifecycle 已安全完成；若还有外围 warning，返回 `result=completed_with_warnings`、warnings 和 pending steps。`result=failed` 或 `result=blocked` 仅用于硬失败或 receipt/capability 失败，修复原因后以同一入口重试，不得宣称完成或手工补写局部状态。
-
-```bash
-ls .agents/workspace/completed/{task-id}/task.md
-```
-
-仅在 finalization 返回 `status=completed` 后确认任务目录已成功移动。
+finalization 按允许的 artifact backfill → lifecycle → task 评论 → core verification → warning task 评论更新 → summary seal 的固定顺序执行。每项 backfill 必须取得成功终态，否则不得进入 lifecycle。summary seal 始终读取任务目录中保留的 durable staging record；平台入口负责校验 marker、owner 和 digest，必要时删除并重建摘要，再复读最终远端顺序。重入直接重复该幂等操作，不从远端评论反向恢复本地正文。`result=completed` 即表示宿主已依据结构化结果和 receipt 安全完成；若还有外围 warning 或 pending step，返回 `result=completed_with_warnings`、warnings 和 pending steps。`result=failed` 或 `result=blocked` 仅用于硬失败或 receipt/capability 失败，修复原因后以同一入口重试，不得宣称完成或手工补写局部状态。沙箱不得从旧挂载执行 `ls completed` 或本地终态校验来重新裁决该结果。
 
 ### 7. 处理 finalization 重试与结果
 
-场景 A 与场景 B `finalization-retry` 都从宿主执行同一个 `task-finalization` 入口。receipt 只是重入提示，不是 canonical truth：每次重入都要重新验证终态 task 评论和完成校验；只有任务已处于 `completed` 且短号 registry 已释放时，才可跳过不可逆的 lifecycle。不得拆开调用旧的 lifecycle、评论同步或完成校验命令。若 task 评论或校验因网络问题返回 `blocked`，保留 receipt 和已完成状态，修复网络后重跑 complete-task；若生命周期仍未完成，任务保持 active 并从 receipt 的待处理步骤继续。
+场景 A 与场景 B `finalization-retry` 都从宿主执行同一个 `task-finalization` 入口。receipt 只是重入提示，不是 canonical truth：每次重入都要重新核对允许的 artifact 回填、终态 task 评论、完成校验，并使用保留的 durable staging record 重做 summary seal；只有任务已处于 `completed` 且短号 registry 已释放时，才可跳过不可逆的 lifecycle。不得拆开调用旧的 lifecycle、评论同步或完成校验命令。若回填、task 评论、summary seal 或校验因网络问题返回 `blocked`，保留 receipt、durable staging record 和已完成状态，修复网络后重跑 complete-task；若生命周期仍未完成，任务保持 active 并从 receipt 的待处理步骤继续。
 
-完成结果必须包含本次 finalization 的结构化输出，确认任务产物和同步状态符合规范：
+完成结果必须直接消费本次宿主 finalization 的结构化输出、receipt 和 warning projection。`completed` 或 `completed_with_warnings` 才允许继续；`failed` / `blocked` / `unknown` 必须保留 receipt 并停止，之后通过同一 finalization 入口重试。不要在沙箱旧挂载中另行运行 `ls completed` 或 `task-verify complete-task.completed`，也不要用其结果推翻宿主结果。
+
+### accepted 后的 sandbox-control 结果恢复
+
+如果本技能在沙箱内执行，且 control client 报告请求已经 accepted 但没有
+terminal result，必须保留原 request identity。此时 client 会在 stderr 输出
+`SANDBOX_CONTROL_REQUEST_ID: <request-id>`。broker 恢复健康后，使用同一个
+request ID 读取 terminal response：
 
 ```bash
-agent-infra-internal task-verify {task-id} complete-task.completed --format text
+agent-infra-internal sandbox-control recover <request-id>
 ```
 
-处理结果：
-- `status=completed` / 退出码 0（全部通过）-> 继续到「告知用户」步骤
-- `status=failed` / 退出码 1 -> 根据输出修复问题后重新运行 finalization
-- `status=blocked` / 退出码 2 -> 保留 receipt 与已完成的步骤并停止；稍后重跑 complete-task 进入 `finalization-retry`
-
-将校验输出保留在回复中作为当次验证输出。没有当次校验输出，不得声明完成。
+accepted 的 task finalization 不得提交新请求。broker 的
+`processing/<request-id>/result.json` 只是私有 transport evidence，不是 task
+receipt，单凭它不能证明任务完成；finalization receipt 和宿主完成校验仍是
+权威。如果请求在 accepted 之前已被拒绝，则可依据错误的 retryability 使用
+新的 request ID。
 
 ### 8. 告知用户
 

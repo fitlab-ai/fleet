@@ -5,7 +5,7 @@
   "platform": {
     "type": "github"
   },
-  "templateVersion": "v0.9.12",
+  "templateVersion": "v0.11.3",
   "sandbox": {
     "engine": "orbstack",
     "runtimes": [
@@ -71,7 +71,7 @@
     "ejected": [],
     "managedBaselines": {
       ".github/workflows/metadata-sync.yml": "sha256:6372ce9f924220ec6042c48d4ea9148aadc48878c67c63e1e21ab073417774d2",
-      ".github/workflows/pr-label.yml": "sha256:8438d56392b63fe365d487b586bb2b242eb142dc3bbd24dd631e18b60e2e0a89",
+      ".github/workflows/pr-label.yml": "sha256:943696091f67884d2bea1b7b19ba102f3b13173f6d993f1edc403b18ce5c5cbc",
       ".github/workflows/status-label.yml": "sha256:c6939f9f86cdfedbc36b1c87b857ca41c0e8b4d6563c1bcd83a895e324e8f726",
       ".claude/commands/analyze-task.md": "sha256:c7fdb2c2216a73ad3cd7235b5a3db1236403a79d4e173481f76305f8e0e30c8e",
       ".claude/commands/archive-tasks.md": "sha256:48474560c30c8d20b9158c70b71ab0aca427da752286f3d652296f13e0c74111",
@@ -89,17 +89,17 @@
       ".claude/commands/create-task.md": "sha256:02950cdbb38a053029b1deb79b78be5a48ca8d3296dcb794774fe690cd565bbe",
       ".claude/commands/import-codescan.md": "sha256:73a667b4152b0dfd88c61c05369eedc80ffa4a91eb2fef628ba13d28c61d36db",
       ".claude/commands/import-dependabot.md": "sha256:daa6f6de1175931f280116b558c418813cf9fb24e5adca4aa474e258ce1f8155",
-      ".claude/commands/import-issue.md": "sha256:b3fd637fd02920f0f384bb613984ba7bc8068a874b9b4bdd780f7935b2f29ac6",
+      ".claude/commands/import-issue.md": "sha256:db90746f60981134daccc75c0b2a8ab1aea161bce5ad63d163e93872d398fa88",
       ".claude/commands/init-labels.md": "sha256:5f830fe9a3eef533f6abcb98ea24caf37830825e55a1df39ac27cff67ae58d66",
       ".claude/commands/init-milestones.md": "sha256:9a7ffd3670158e4e34e31c7dcb9987d6eb4e2d3e2ddd6b7e5b1454791688f034",
       ".claude/commands/plan-task.md": "sha256:e0d12ffac1ad65fb568a5219895ef28012719dd71de4c63c153dababe153e41d",
       ".claude/commands/refine-title.md": "sha256:cd63b17f0c151b21ac85bd0700a52f6e3c81e3ae6aa22e0b6c11036e2b0d4cdd",
-      ".claude/commands/restore-task.md": "sha256:30d3d63317b4dae986cc8c0c21ac024746375082a76907286b6e03a4a13bca6a",
+      ".claude/commands/restore-task.md": "sha256:34780525602bf4399f086d4bf84067706fda7b81a812aa9dd92be3cdd360bf1a",
       ".claude/commands/review-analysis.md": "sha256:e31ea897e3fb28c864fb9e95888a21dcf95acb7db8713a70edd69737dc15ebdf",
       ".claude/commands/review-code.md": "sha256:4d7958f04237241006cdaf63ac47bd9547c8c04b66b75fc8bc27b2a18ae48898",
       ".claude/commands/review-plan.md": "sha256:fba112f44958401915aa44372f58e6dff899f8f410b22fc8488ef228a867c6c5",
       ".claude/commands/review-pr.md": "sha256:8c2c6100b2e3ef783a276757ed4f44d23d7734f27ce9952ede00c5ba58bef8ea",
-      ".claude/commands/run-manual-validation.md": "sha256:bc740ae3ac15f70bc371feaf673aff312672768abef2cbeb31440b3ccdcf7ca8",
+      ".claude/commands/run-manual-validation.md": "sha256:a1d3c3cae97772fe86120eebbe9a4b6fea7a617c5402d6eed609a9f31318466e",
       ".claude/commands/run-task.md": "sha256:92b1707e8aa06686bac422c2f09002ddf86ffbdb4ad8779631c341ac787ceddb",
       ".claude/commands/update-agent-infra.md": "sha256:812379def35ef59a3739fbb199c2c4e63e83cdf7b4e252ce0c2bab832a3099bc",
       ".claude/commands/watch-pr.md": "sha256:c4a6f8033c34e5a39296f57c70d9381920a25aa346cfcc93f0e45e9f3b4c7a87",

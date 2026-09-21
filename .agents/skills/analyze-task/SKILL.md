@@ -9,10 +9,15 @@ description: >
 # 分析任务
 > `--agent` 取值见 `.agents/rules/task-management.md`「合作者 token 规范」。
 
-若入口业务操作数包含 `--orchestrated`，绑定 `{execution-flag}` = `--orchestrated` 并原样转发给 completed 事件；否则绑定为空。不得从 `orchestration.json`、环境变量或历史产物推断该标记。
+若入口业务操作数包含 `--orchestrated`，绑定 `{execution-flag}` = `--orchestrated` 并原样转发给 completed 事件；否则绑定为空。不得从 `orchestration.json`、环境变量或历史产物推断该标记。生命周期事件还必须携带显式触发信息：编排调用使用 `{trigger-initiator}=orchestrator`，否则使用 `model`；`{request-id}` 是本任务与本轮产物的稳定单行标识，`{reason-code}` 使用 `user-request`、`new-requirement` 或 `upstream-fact-doubt`；started 与 completed 使用同一组值。
 
 ## 行为边界 / 关键规则
 
+### 持久化报告证据
+
+生成分析报告时，先读取 `.agents/rules/evidence-reporting.md`。状态核对和成功检查记录命令、目标范围、状态/结构化结果、实际结果和未覆盖部分；失败、阻塞或争议才附决定性原文摘录。
+
+- 涉及候选资格或 `HD-N` 判断时，先读取 `.agents/rules/decision-qualification.md`，基于 task.md 规范化约束/候选完成资格审计，并在分析产物记录五张资格审计表；不得把来源不明或未确认约束自动升级为排除条件
 - 本技能仅产出需求分析文档（`analysis.md` 或 `analysis-r{N}.md`）—— 不修改任何业务代码
 - 严格基于 `task.md` 中已有的任务输入、需求、上下文和来源信息展开分析
 - 生成会同步到 Issue 的任务或生命周期 Markdown 前，先读取 `.agents/rules/sync-content-generation.md` 并遵循其中的生成端约束；同步端不解析或改写正文
@@ -25,7 +30,7 @@ description: >
 
 在加载 workflow / skill / rules 指令之后、做任何任务状态判断或用户可见结论之前，必须先执行状态核对。指令类文件读取不算对外动作或结论。
 
-运行以下命令，并把原文粘贴到本轮产物的 `## 状态核对` 段：
+运行以下命令，并在本轮产物的 `## 状态核对` 段记录任务/产物范围、关键结果和未覆盖部分；正常成功不粘贴完整目录清单或 `task.md` 尾部。失败、阻塞、身份不一致或争议时，附决定性原文行：
 
 ```bash
 agent-infra-internal task-snapshot {task-id} --format text
@@ -44,7 +49,7 @@ agent-infra-internal task-snapshot {task-id} --format text
 确认前置条件和轮次后、本轮第一个产出动作之前执行：
 
 ```bash
-agent-infra-internal task-event {task-id} analyze.started --agent {standard-agent-token}
+agent-infra-internal task-event {task-id} analyze.started --agent {standard-agent-token} --initiator {trigger-initiator} --request-id {request-id} --reason-code {reason-code}
 ```
 
 ## 执行步骤
@@ -70,7 +75,7 @@ agent-infra-internal task-event {task-id} analyze.started --agent {standard-agen
 - 当前已知的受影响文件和约束
 
 如 `task.md` 包含以下来源字段，补充读取对应来源信息：
-- `issue_number` - Issue
+- `platform_issue_identity` - Issue 的 canonical identity
 - `codescan_alert_number` - Code Scanning 告警
 - `security_alert_number` - Dependabot 告警
 
@@ -112,7 +117,7 @@ agent-infra-internal task-event {task-id} analyze.started --agent {standard-agen
      - 若已存在 `pending_question`（上一问尚未得到答案）→ 复述该 `pending_question`，**不**修改它、**不**增加 `question_count`；
      - 否则（无待答问题）→ 选最高价值的一个问题（验收标准 > 范围 > 歧义），写入 `## Brainstorming`：`status: asking`、`pending_question: <问题>`、`question_count += 1`。
   2. 若 `start_date` 为空，写入当日日期（`date +%F`）；随后执行 `agent-infra-internal task-event {task-id} analyze.awaiting-input --agent {standard-agent-token} --question {question_count}`，由核心统一更新基础 frontmatter 和 Activity Log。
-  3. Issue 同步（存在 `issue_number` 时，任一失败跳过）：调用 `agent-infra-internal platform-comment sync {task-id} --kind task --agent {standard-agent-token}` 更新 **task 评论**；`status` label 维持 `pending-design-work`；**不**发布分析产物评论。
+  3. Issue 同步（存在有效 `platform_issue_identity` 时，任一失败跳过）：调用 `agent-infra-internal platform-comment sync {task-id} --kind task --agent {standard-agent-token}` 更新 **task 评论**；`status` label 维持 `pending-design-work`；**不**发布分析产物评论。
   4. 校验（替代步骤 8 的 artifact gate）：`agent-infra-internal task-verify {task-id} analyze.awaiting-input --format text`（早退已置 `current_step: requirement-analysis` 且已写入 `start_date`，预期通过）；并保留 `rg -n 'Analyze Task \(Brainstorming\)' .agents/workspace/active/{task-id}/task.md` 与 task 评论同步证据。**不**跑 artifact gate，也不跑 `check activity-log` / `check platform-sync`（二者绑定分析产物路径）。
   5. 用户输出：只展示当前**单个问题** + 如何回答/继续（再次触发 `analyze-task {task-ref}` 并附答案），并按 `.agents/rules/next-step-output.md` 在末行追加 `Completed at`。
   6. **STOP**，等待回答。下一次触发回到本步骤。
@@ -132,6 +137,14 @@ agent-infra-internal task-event {task-id} analyze.started --agent {standard-agen
 
 ### 6. 输出分析文档
 
+在首次写入本轮 `{analysis-artifact}` 前，先创建受控报告骨架：
+
+```bash
+agent-infra-internal task-artifact {task-id} init --family analysis --artifact {analysis-artifact}
+```
+
+骨架只包含身份元数据、稳定 section marker 和必需标题；必须填入真实分析内容后才能通过完成门禁。finalizer 返回结构错误时，直接修正正式产物后重跑 `task-artifact {task-id} finalize-local --family analysis --artifact {analysis-artifact}`；当前结构、资格和摘要事实是唯一门禁。
+
 > 步骤 6–9 属**场景 A（正常产出）**路径。**场景 B（提问早退）**已在步骤 4 内完成状态更新、task 评论同步与校验并 STOP，不进入这些步骤。
 
 创建 `.agents/workspace/active/{task-id}/{analysis-artifact}`。
@@ -146,7 +159,7 @@ agent-infra-internal task-event {task-id} analyze.started --agent {standard-agen
 
 ## 状态核对
 
-> 粘贴第 0 步状态核对命令原文；每条命令以 `$ ` 开头。
+> 记录第 0 步状态核对命令、任务/产物范围、关键结果和未覆盖部分；每条命令以 `$ ` 开头。正常成功不粘贴完整目录清单或 `task.md` 尾部，失败、阻塞、身份不一致或争议时附决定性原文行。
 
 ## 需求来源
 
@@ -172,6 +185,10 @@ agent-infra-internal task-event {task-id} analyze.started --agent {standard-agen
 
 ## 依赖关系
 - {需要的依赖和与其他模块的协调}
+
+## 资格审计
+
+> 按 `.agents/rules/decision-qualification.md` 填写约束依赖、候选资格、分类结果、上游关系、依赖快照五张表；没有 artifact 上游时保留空表头，不虚构关系。
 
 ## 假设
 
@@ -204,9 +221,16 @@ agent-infra-internal task-event {task-id} analyze.started --agent {standard-agen
   - 用新值覆盖 frontmatter 的 `priority` 字段
   - 在本轮分析产物 `{analysis-artifact}` 中追加 `## 优先级重估` 段，记录一条：`priority {old} → {new} (rationale: {基于本轮分析的简短依据})`
   若重估值与当前值一致，跳过：不写入 `## 优先级重估` 段。后续 Flow A 同步会读取可能更新过的 frontmatter，并自动把新值同步到 Issue。
-- 完成业务内容更新后执行 `agent-infra-internal task-event {task-id} analyze.completed --agent {standard-agent-token} --artifact {analysis-artifact} {execution-flag}`，由核心原子登记链接、阶段、代理、时间、版本和 Activity Log。
+- 完成本地产物后，先执行本地完成前门禁：
+  ```bash
+  agent-infra-internal task-artifact {task-id} finalize-local --family analysis --artifact {analysis-artifact}
+  ```
+  - `status=passed`：保存本次返回的 `artifactSha256` 和 `semanticDigest`；finalizer 已记录对应的一次性本地 provenance intent。
+  - `status=failed`：直接修正正式产物并完整重跑 finalizer；若仍失败且诊断未解决，继续下一轮。
+  - 当前正式产物发生外部变化、无法安全修复、诊断或指纹重复、无进展，或达到共享规则的编辑上限时停止，不发布 completed 事件。
+- 使用同一次 `status=passed` 返回的摘要执行 `agent-infra-internal task-event {task-id} analyze.completed --agent {standard-agent-token} --initiator {trigger-initiator} --request-id {request-id} --reason-code {reason-code} --artifact {analysis-artifact} --artifact-sha256 {artifact-sha256} --semantic-digest {semantic-digest} {execution-flag}`，由核心登记链接、阶段、代理、时间、版本和 Activity Log。
 
-如果 task.md 中存在有效的 `issue_number`，执行以下同步操作（任一失败则跳过并继续）：
+如果 task.md 中存在有效的 `platform_issue_identity`，执行以下同步操作（任一失败则跳过并继续）：
 - 调用 `agent-infra-internal platform-issue sync {task-id} --agent {standard-agent-token} --status pending-design-work --fields`
 - 调用 `agent-infra-internal platform-comment sync {task-id} --kind task --agent {standard-agent-token}`
 - 调用 `agent-infra-internal platform-comment sync {task-id} --kind artifact --artifact {analysis-artifact} --agent {standard-agent-token}`

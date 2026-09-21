@@ -16,7 +16,7 @@
 
 `prSummary` 属于 `.agents/rules/pr-sync.md`，本规则不实现 PR 聚合。
 
-`pr-review` 原文只通过 `artifact` / `artifactChunk` marker 同步为 Issue artifact 评论，不作为 `restore-task` 恢复来源；恢复仍只接受 Issue 编号并只读注册的 Issue marker，不新增 PR 来源。
+`pr-review` 原文只通过 `artifact` / `artifactChunk` marker 同步为 Issue artifact 评论，不作为 `restore-task` 恢复来源；恢复仍只接受 Issue 原始 token 并只读注册的 Issue marker，不新增 PR 来源。
 
 ## 平台 intent
 
@@ -24,7 +24,9 @@
 
 ```bash
 agent-infra-internal platform-context resolve [--cwd <path>]
-agent-infra-internal platform-comment list --issue <N> [--cwd <path>]
+agent-infra-internal platform-comment list --issue <issue-token> [--cwd <path>]
+agent-infra-internal platform-comment recover --issue <issue-token> --task-id <TASK-id> \
+  --output <.agents/workspace/.restore-staging-*/task.md> [--cwd <path>]
 agent-infra-internal platform-comment owner <task-ref>
 agent-infra-internal platform-comment sync <task-ref> \
   --kind task|artifact|summary|cancel --agent {standard-agent-token} \
@@ -32,7 +34,10 @@ agent-infra-internal platform-comment sync <task-ref> \
 ```
 
 - `applied|no-op|degraded` → exit 0；`failed` → exit 1；`blocked` → exit 2。
-- task 评论保持 `<details>` frontmatter 可逆格式；artifact 原文内联并在超过 profile 上限时使用 `artifactChunk`。
+- 生命周期验证把 Issue Type、milestone、labels、需求锚点和非关键评论作为平台审计。每条审计保留 check id、原始状态、reason 和 action；缺失、权限不足或值不一致不会阻塞 gate。身份歧义、协议冲突、实际写入失败和写后状态未知仍为硬失败。
+- task 评论保持 `<details>` frontmatter 可逆格式，只同步确定性的当前任务投影，并折叠保留创建任务、人工决策等关联动作。artifact 评论在正文前折叠显示该产物动作及其提交记录；交付摘要保留创建 PR 与完成任务记录。每条评论的元数据可包含多条日志。恢复核心从这些元数据重建活动日志，绝不把完整 `task.md` 作为评论载荷保存。artifact 原文内联并在超过 profile 上限时使用 `artifactChunk`。
+- 长度预检与 platform verification 使用同一最终渲染正文的 UTF-8 字节数。正文超限时失败关闭；本地 `task.md` 不会被截断。
+- 恢复元数据包含动作关联的日志条目和校验摘要。restore 只接受与 task 评论同作者、任务身份匹配且校验通过的元数据；缺失或损坏的记录不得推测。
 - 相同 intent 重放必须收敛为 `no-op`；重复 marker 返回 `COMMENT_MARKER_CONFLICT` 且不写入。
 - 外部贡献者锁定统一使用 `platform-comment owner`；不同作者且无 triage 时返回 `COMMENT_OWNER_CONFLICT`。
 
@@ -59,7 +64,7 @@ agent-infra-internal task-warning {task-id} add \
 ```bash
 agent-infra-internal platform-issue inspect {task-id}
 agent-infra-internal platform-issue create {task-id} --agent {standard-agent-token}
-agent-infra-internal platform-issue bind {task-id} --issue {number} --agent {standard-agent-token}
+agent-infra-internal platform-issue bind {task-id} --issue {issue-token} --agent {standard-agent-token}
 agent-infra-internal platform-issue sync {task-id} --agent {standard-agent-token} {desired-state-flags}
 ```
 
@@ -70,6 +75,8 @@ agent-infra-internal platform-issue sync {task-id} --agent {standard-agent-token
 - `blocked` → exit 2
 
 status labels 始终至多一个；关闭后不保留 status label。`in:` labels 只从项目允许映射与仓库实际 labels 交集产生。需求复选框以 task.md 原文为身份，歧义时 fail closed。
+
+PR event 的 `in:` 同步使用 `agent-infra-internal platform-pr sync-in-labels --pr <N> [--cwd <path>]`。PR files 是事件证据；唯一 closing Issue 按 Issue→PR 顺序写入并复读，零或多个 closing Issue 只写 PR 并返回 `degraded`。写入后副作用不明或复读未收敛必须返回 `blocked` 与 `IN_LABEL_SYNC_PARTIAL`。
 
 ## 补发
 

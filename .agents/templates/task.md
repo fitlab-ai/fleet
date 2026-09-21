@@ -13,7 +13,7 @@ start_date:                     # Feature 可选 Issue 字段：YYYY-MM-DD
 target_date:                    # Feature 可选 Issue 字段：YYYY-MM-DD
 current_step: requirement-analysis # requirement-analysis | requirement-analysis-review | technical-design | technical-design-review | code | code-review | completed
 assigned_to:                   # claude | codex | antigravity | opencode | human
-pr_delivery_fact: '{"version":1,"state":"unbound","reason":"initial"}'
+pr_delivery_fact: '{"version":2,"state":"unbound","reason":"initial"}'
 delivery_remote: origin        # 任务分支交付使用的 Git remote
 delivery_base_ref: main        # 任务 PR 的目标分支
 checkpoint_commit:             # 最近一次本地 checkpoint commit
@@ -36,9 +36,15 @@ delivery_remote_head:          # 最近一次成功交付到 remote 的任务分
 
 ### 约束
 
+| constraint_id | statement | status | authority | source | evidence | derived_from | approval_evidence |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+
 ### 已确认决策
 
 ### 候选与否决方案
+
+| candidate_id | statement | status | constraint_ids | impact | evidence |
+| --- | --- | --- | --- | --- | --- |
 
 ### 验收标准
 
@@ -96,7 +102,24 @@ delivery_remote_head:          # 最近一次成功交付到 remote 的任务分
 <!-- 工作流降级、平台同步失败、权限不足等需要后续注意的事件写入此段。无告警时保留表头即可。 -->
 
 | id | time | step | severity | code | status | target | message | action | resolved_at | resolution |
-|----|------|------|----------|------|--------|--------|---------|--------|-------------|------------|
+|----|------|------|----------|------|--------|---------|--------|-------------|------------|------------|
+
+## 返工意图
+
+| intent_id | finding_id | source_artifact | source_sha256 | target | status | declared_at | consumed_at |
+|-----------|------------|----------------|---------------|--------|--------|-------------|-------------|
+
+## 产物失效记录
+
+### Operations
+
+| operation_id | source_family | source_artifact | source_round | source_sha256 | status | processed | total | created_at | updated_at | completed_at | error |
+|--------------|---------------|-----------------|--------------|---------------|--------|-----------|-------|------------|------------|--------------|-------|
+
+### Targets
+
+| target_id | operation_id | target_kind | target_family | target_artifact | target_round | target_sha256 | status | reason_code | updated_at |
+|-----------|--------------|-------------|---------------|-----------------|--------------|---------------|--------|-------------|------------|
 
 ## 活动日志
 

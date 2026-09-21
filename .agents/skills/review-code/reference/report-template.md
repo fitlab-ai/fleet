@@ -1,6 +1,10 @@
 # 审查报告模板
 
+> 写入本报告前，先用 `task-artifact init --family review-code` 创建骨架，并保留每个 `artifact-section` marker；骨架不包含审查结论。
+
 编写 `review-code.md` 或 `review-code-r{N}.md` 时使用本模板。
+
+> “审查输入”字段用于读者追溯。生命周期身份以 `review-code.started` 冻结的输入和完成 receipt 为准，不从本报告正文解析。
 
 ## 输出模板
 
@@ -11,10 +15,6 @@
 - **产物文件**：`{review-artifact}`
 - **审查输入**：
   - `{code-artifact}`（本轮实际检视的最高轮实现产物——含如存在的最高轮修复产物，如 `code-r2.md`；无法可靠取得则留空）
-
-## 状态核对
-
-> 粘贴状态核对命令原文；每条命令以 `$ ` 开头。
 
 ## 审查摘要
 
@@ -27,8 +27,32 @@
 - **审查差异基线**：{用于完整 diff/fingerprint 的 D；必须等于 merge-base(R, saved M)}
 - **审查差异指纹**：{git-workflow snapshot 输出的 fingerprint 字段}
 - **审查快照树**：{git-workflow snapshot 输出的 tree 字段}
-- **总体结论**：{通过 / 需要修改 / 拒绝}（恰取一个；禁止写组合短语，否则 verify gate 失败）
+- **总体结论**：{通过 / 需要修改 / 拒绝}
 - **发现（AI 可处理）**：{unresolved-blockers} 阻塞项，{unresolved-major} 主要，{unresolved-minor} 次要 / **人工校验**：0
+
+## 资格审计复核
+
+> 按 `.agents/rules/decision-qualification.md` 复核：约束依赖、候选资格、分类结果、上游关系和依赖快照五张表。
+
+### 约束依赖
+| constraint_id | constraint_digest | role | evidence |
+| --- | --- | --- | --- |
+
+### 候选资格
+| candidate_id | status | impact | constraint_ids | evidence |
+| --- | --- | --- | --- | --- |
+
+### 分类结果
+| decision_id | classification | evidence |
+| --- | --- | --- |
+
+### 上游关系
+| upstream_family | upstream_artifact | upstream_round | upstream_sha256 | relation |
+| --- | --- | --- | --- | --- |
+
+### 依赖快照
+| task_input_digest | non_constraint_input_digest | upstream_artifact_digest |
+| --- | --- | --- |
 
 ## 检视覆盖声明
 
@@ -117,36 +141,6 @@
 > 如本轮无人工校验项，保留段落标题并写「（无）」。
 
 
-## 审查分歧账本回写
-
-> 本段记录将提交的结构化意图：新 finding 用 `task-ledger finding-upsert`，上一轮响应复核用 `finding-review`；由核心分配 `CD-N` 并校验状态机，禁止手写 task.md 表格。
-> 凡升级为 `needs-human-decision` 的 finding，必须按 `.agents/rules/human-decision-context.md` 在本报告中提供自足详情块，并让 evidence 指向该稳定锚点。
-
-## 证据原文
-
-> 每条“我验证了 X”断言都要配对对应 tool output 原文；gate 仅校验本段存在和至少一行 `$ `。每条 Blocker 必须配可复现的测试、调用链、状态转换、数据流、规范冲突或准确位置证据；无法复现的判断须降级或移入「自我质疑」。
-
-- 断言：{verified claim}
-```text
-$ {command}
-{raw output}
-```
-
-## 自我质疑
-
-> 显式声明本轮审查中**未直接验证**的结论、推断项与所作假设；下游据此可反驳。无则写「（无）」。
-
-- {未直接验证的结论或推断；说明为何未验证、若被推翻的影响}
-
-## 亮点
-
-- {what went well}
-
-## 与方案一致性
-
-- [ ] 实现与技术方案一致
-- [ ] 没有意外的范围扩张
-
 ## 结论与建议
 
 ### 审查决定
@@ -156,4 +150,39 @@ $ {command}
 
 ### 下一步
 {recommended next step}
+
+## 状态核对
+
+> 记录状态核对命令、审查范围、关键结果和未覆盖部分；每条命令以 `$ ` 开头。
+> 按 `.agents/rules/evidence-reporting.md` 同时记录审查范围、关键结果和未覆盖部分；正常成功不粘贴完整 stdout。
+
+## 证据原文
+
+> 遵循 `.agents/rules/evidence-reporting.md`：每条断言配对 `$ ` 命令和相称结果摘要；Blocker、失败、阻塞或争议必须保留可复现证据、准确位置和决定性摘录；无法复现的判断须降级或移入「自我质疑」。
+
+- 断言：{verified claim}
+```text
+$ {command}
+{result summary or decisive excerpt}
+```
+
+## 自我质疑
+
+> 显式声明本轮审查中**未直接验证**的结论、推断项与所作假设；下游据此可反驳。无则写「（无）」。
+
+- {未直接验证的结论或推断；说明为何未验证、若被推翻的影响}
+
+## 审查分歧账本回写
+
+> 本段记录将提交的结构化意图：新 finding 用 `task-ledger finding-upsert`，上一轮响应复核用 `finding-review`；由核心分配 `CD-N` 并校验状态机，禁止手写 task.md 表格。
+> 凡升级为 `needs-human-decision` 的 finding，必须按 `.agents/rules/human-decision-context.md` 在本报告中提供自足详情块，并让 evidence 指向该稳定锚点。
+
+## 亮点
+
+- {what went well}
+
+## 与方案一致性
+
+- [ ] 实现与技术方案一致
+- [ ] 没有意外的范围扩张
 ```

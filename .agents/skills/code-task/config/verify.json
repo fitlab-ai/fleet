@@ -17,39 +17,20 @@
     },
     "artifact": {
       "file_pattern": "code.md|code-r{N}.md",
-      "required_sections": [
-        "实现输入",
-        "变更文件",
-        "关键代码说明",
-        "测试结果",
-        "与方案的差异",
-        "供审查关注的内容",
-        "状态核对",
-        "证据原文"
-      ],
-      "required_patterns": [
-        "^\\$ "
-      ]
+      "schema": "code"
     },
     "implementation-input": {},
     "activity-log": {
       "expected_action_pattern": "(Code Task|Code) \\(Round \\d+(?:(?:, fix for review-code(?:-r\\d+)?\\.md)|(?:, decision II-[1-9]\\d*))?\\)"
     },
     "review-ledger": {
-      "stage_scope": ["analysis", "plan"]
+      "stage_scope": [
+        "analysis",
+        "plan"
+      ]
     },
     "platform-sync": {
-      "when": "issue_number_exists",
-      "expected_status_label": "status: in-progress",
-      "expected_comment_marker": "<!-- sync-issue:{task-id}:{artifact-stem} -->",
-      "verify_comment_content": true,
-      "verify_task_comment_content": true,
-      "verify_issue_type": true,
-      "verify_issue_fields": false,
-      "verify_milestone": true,
-      "verify_milestone_specific": true,
-      "expected_status_label_key": "inProgress",
-      "expected_comment_marker_key": "artifact"
+      "when": "platform_issue_identity_exists"
     }
   }
 }

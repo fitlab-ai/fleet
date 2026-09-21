@@ -47,7 +47,7 @@ description: >
 
 先解析 task scope：可选的 `--task <ref>` 或 `-t <ref>` 绑定 `{task-id}`；位置 task ref 不再解释。剩余的可选位置参数绑定为 `{target-branch}`。
 
-如果提供了 `{task-id}`，读取 `.agents/workspace/active/{task-id}/task.md` 获取任务信息（例如 `issue_number`、`type` 等）。
+如果提供了 `{task-id}`，读取 `.agents/workspace/active/{task-id}/task.md` 获取任务信息（例如 `platform_issue_identity`、`type` 等）。
 如果未提供，可从当前 session 上下文获取；仍无法确定 `{task-id}` 时，后续步骤中的任务关联逻辑跳过。
 
 ### 2. 确定目标分支
@@ -70,23 +70,23 @@ description: >
 
 执行前先读取 `.agents/rules/issue-pr-commands.md`，把标题和正文写入临时文件，并调用其中的 `platform-pr create` intent。core 在任务锁内按 remote branch、head/base 和 PR 身份事实执行：唯一既有 PR 会复用并绑定，零个才创建，多个稳定失败；review 或 task sync 记录不作为创建 PR 的前置门禁，重放不得产生重复 PR。
 
-如果获取到 `{task-id}` 且对应任务提供了 `issue_number`，必须在 PR 正文中保留 `Closes #{issue-number}`。
+如果获取到 `{task-id}` 且对应任务提供了 `platform_issue_identity`，在 provider 支持 numeric closing reference 时必须在 PR 正文中保留 `Closes #{issue-number}` 或 provider 等价关闭关键字。
 
 ### 6. 同步 PR 元数据
 
-记录 `platform-pr create` 结构化结果中的 `result`（`pr_created`、`pr_reused` 或 `no_op`），并调用 `agent-infra-internal platform-pr sync {task-id} --agent {standard-agent-token} --metadata --closing-issue --result {primary-result}`。core 从 Issue 复制 type / `in:` labels、assignee 和具体 milestone，并维护 Development 关联；逐项权限不足返回 degraded，不反向更新 Issue。PR 已成功绑定后，metadata/summary 同步失败只产生与 primary result 对应的 `pr_created_with_warnings`、`pr_reused_with_warnings` 或 `no_op_with_warnings`，保留主动作事实，重试只执行未完成的同步步骤。
+记录 `platform-pr create` 结构化结果中的 `result`（`pr_created`、`pr_reused` 或 `no_op`），并调用 `agent-infra-internal platform-pr sync {task-id} --agent {standard-agent-token} --metadata --closing-issue --result {primary-result}`。`in:` target 由 shared core 根据 task-bound diff/PR evidence 和仓库映射计算，唯一 closing Issue 按 Issue→PR 顺序收敛，其他 metadata 仍从 Issue 同步；不从 Issue 反向复制 `in:`，也不清除非 `in:` labels。权限不足逐项返回 degraded，部分副作用返回 blocked/`IN_LABEL_SYNC_PARTIAL`。
 
 ### 7. 生成 PR 代码增减报告
 
-创建或唯一复用 PR 后，调用 `agent-infra-internal platform-pr inspect {task-id}` 取得权威 base/head SHA，并按 `reference/change-report.md` 统计完整 PR 的分类行数、Git blob 字节数、rename 与疑似不必要变化。执行本步骤前先读取该 reference。
+创建或唯一复用 PR 后，调用 `agent-infra-internal platform-pr inspect {task-id}` 取得权威 base/head SHA，并按 `reference/change-report.md` 生成完整 PR 的机械统计。结合任务目标与完整三点 diff 生成六项带文件证据的 precheck candidate，再调用 `platform-pr change-report` 写入任务绑定的 `pr-change-report.json` sidecar。执行本步骤前先读取该 reference。
 
-报告既是下方 reviewer 摘要的一部分，也必须出现在最终用户回复中；不得只给总行数、忽略字节变化或只统计最后一个 commit。
+报告由 core renderer 生成，既是下方 reviewer 摘要的一部分，也必须出现在最终用户回复中；不得只给总行数、忽略字节变化、只统计最后一个 commit，或由调用方自行拼接报告段。
 
 ### 8. 发布审查摘要
 
 读取最新的上下文产物：`plan.md` / `plan-r{N}.md`、`review-plan.md` / `review-plan-r{N}.md`、`code.md` / `code-r{N}.md`、`review-code.md` / `review-code-r{N}.md`（存在时）。
 
-基于这些产物聚合 reviewer 摘要，并追加第 7 步生成的 `### PR 代码增减` 段落，再使用隐藏标记维护唯一且幂等的摘要评论。调用 `summary-sync` 时继续传递同一个 `--result {primary-result}`，不得根据同步子步骤猜测 PR 是创建还是复用。
+基于这些产物聚合 reviewer 摘要，正文只放一次 `<!-- canonical-pr-change-report -->` 占位符，再使用隐藏标记维护唯一且幂等的摘要评论。调用 `summary-sync` 时传入 `--change-report-file .agents/workspace/active/{task-id}/pr-change-report.json`，并继续传递同一个 `--result {primary-result}`；不得根据同步子步骤猜测 PR 是创建还是复用。
 
 > canonical context、摘要聚合和 `summary-sync` 调用见 `reference/comment-publish.md`（其引用 `.agents/rules/pr-sync.md`）。发布摘要前先读取该 reference。
 
@@ -139,15 +139,15 @@ agent-infra-internal task-verify {task-id} create-pr.completed --format text
 
 - 必须检查分支中的全部提交，而不是只看最后一个
 - `create-pr` 不能把 type label 映射委托给其他技能，必须在获取到 `{task-id}` 时于本技能内内联处理
-- summary marker 与当前 HEAD 由 `platform-pr summary-sync` 统一包装
-- 如果当前分支已存在 PR，直接告知用户 PR URL 并结束，不做重复同步
+- summary marker、权威 PR head 和 `### PR 代码增减` 由 `platform-pr summary-sync` 统一包装
+- 如果当前分支已存在 PR，仍须完成绑定、报告生成、摘要同步和结果校验；不得因复用而直接结束
 - 如果从 Issue 继承元数据失败，继续使用 task.md 和分支推断兜底
 
 ## 错误处理
 
 - `{target}` 与 `HEAD` 之间没有可提交内容
 - 推送被拒绝：建议执行 `git pull --rebase`
-- 已存在 PR：直接输出当前 PR URL 并结束
+- 已存在 PR：继续完成绑定、报告生成、摘要同步和结果校验后输出当前 PR URL
 - 无法访问 Issue 元数据：跳过继承并继续
 - PR 创建失败且已关联 `{task-id}`：调用 `agent-infra-internal task-warning {task-id} add --step create-pr --severity ACTION_REQUIRED --code PR_CREATE_FAILED --target pr --message "{reason}" --action "修复推送、权限或平台问题后重跑 create-pr"` 提交结构化 warning 意图，不写不完整 `pr_delivery_fact`
 - PR 摘要评论失败且已关联 `{task-id}`：按 `.agents/rules/pr-sync.md` 记录 `COMMENT_SYNC_FAILED` 告警，不回滚已创建 PR

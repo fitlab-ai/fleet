@@ -125,12 +125,19 @@ date "+%Y-%m-%d %H:%M:%S%z" | sed 's/\([+-][0-9][0-9]\)\([0-9][0-9]\)$/\1:\2/'
 - `blocked`：保留 candidate 文件，修复暂态问题后用同一文件重试。
 - `failed`：报告稳定错误码；幂等冲突时不得改写原 key 或原 candidate 后重试。
 
+受控调用可能在结果中返回 `control` 请求证据：`accepted: true` 且
+`recovery: none` 表示可以消费当前结果；`accepted: false` 且
+`recovery: new-request-id` 表示请求尚未受理，暂态问题恢复后才能用同一份
+candidate 和新的 outer request ID 重试；`recovery: same-request-id` 或
+`recovery: inspect-domain-state` 表示请求已经受理，不得创建新的 candidate 或
+自动重放，必须先使用原 request 检查结果或宿主任务状态。
+
 ### 4. 平台失败兼容说明
 
 平台级联由宿主服务完成。兼容的人工恢复命令仍由宿主 warning 指引，不在沙箱内执行：
 
 ```bash
-agent-infra-internal task-warning {task-id} add --step create-task --severity ACTION_REQUIRED --code ISSUE_CREATE_FAILED --target issue --message "{error_code}: {error_message}" --action "修复认证/网络/模板问题后手动重试 Issue 创建，或手动创建/找到 Issue 后写入 issue_number"
+agent-infra-internal task-warning {task-id} add --step create-task --severity ACTION_REQUIRED --code ISSUE_CREATE_FAILED --target issue --message "{error_code}: {error_message}" --action "修复认证/网络/模板问题后手动重试 Issue 创建，或手动创建/找到 Issue 后执行 platform-issue bind"
 agent-infra-internal platform-comment sync {task-id} --kind task --agent {standard-agent-token}
 ```
 
@@ -168,7 +175,7 @@ agent-infra-internal task-verify {task-id} create-task.completed --format text
 - 标题：{title}
 - 类型：{type}
 - 工作流：{workflow}
-- Issue：#{issue_number} {issue_url}
+- Issue：#{issue-number} {issue_url}
 
 产出文件：
 - 任务文件：.agents/workspace/active/{task-id}/task.md
@@ -219,10 +226,10 @@ Issue 创建失败：
 下一步 - 执行需求分析：
 {next-step-commands}
 
-后续如需平台同步：修复认证/网络/模板问题后，可按 `.agents/rules/create-issue.md` 对当前任务手动执行一次 Issue 创建；或手动创建/查找 Issue，并把 `issue_number` 写入 task.md，后续技能会接管级联同步。
+后续如需平台同步：修复认证/网络/模板问题后，可按 `.agents/rules/create-issue.md` 对当前任务手动执行一次 Issue 创建；或手动创建/查找 Issue 后执行 `platform-issue bind`，由 provider 解析 token 并写入 `platform_issue_identity`，后续技能会接管级联同步。
 
 [ACTION REQUIRED] Workflow warnings are open:
-  - WW-N ISSUE_CREATE_FAILED (issue): 修复认证/网络/模板问题后手动重试 Issue 创建，或手动创建/找到 Issue 后写入 issue_number
+  - WW-N ISSUE_CREATE_FAILED (issue): 修复认证/网络/模板问题后手动重试 Issue 创建，或手动创建/找到 Issue 后执行 `platform-issue bind`
 ```
 
 
@@ -247,7 +254,7 @@ Issue 创建失败：
 1. **清晰度**：如果用户描述模糊或缺少关键信息，先要求澄清
 2. **与 import-issue 的区别**：`import-issue` 从 Issue 导入任务；`create-task` 从自由描述创建
 3. **工作流顺序**：创建任务后，通常先执行 `analyze-task` 再进入 `plan-task`
-4. **Issue 级联失败**：如果规则执行失败，task.md 仍保留；需要后续平台同步时，可手动写入 `issue_number` 后继续执行工作流
+4. **Issue 级联失败**：如果规则执行失败，task.md 仍保留；需要后续平台同步时，可手动执行 `platform-issue bind`，不得手工写入旧的 Issue 字段
 
 ## 错误处理
 

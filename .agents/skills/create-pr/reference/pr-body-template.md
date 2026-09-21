@@ -42,7 +42,7 @@ git diff <target-branch>...HEAD
 
 元数据同步顺序：
 1. 通过 `.agents/rules/issue-pr-commands.md` 的 Issue 读取命令查询 Issue labels 和 milestone
-2. 从映射出的 type label、非 `type:` / 非 `status:` 的 Issue labels，以及当前 Issue `in:` labels 构建 `{label-args}`（commit 已经计算过，不在此重算，也不写回 Issue）
+2. 从映射出的 type label 和非 `type:` / 非 `status:` 的 Issue labels 构建 `{label-args}`；`in:` labels 由 shared platform core 根据 task-bound diff/PR evidence 统一计算，不在正文生成步骤重算，也不从 Issue 反向复制
 3. 按 `.agents/rules/milestone-inference.md` 的 "阶段 3：`create-pr`" 复用 Issue milestone 构建 `{milestone-arg}`
 4. 按 `.agents/rules/issue-pr-commands.md` 的创建 PR 命令模板与权限降级规则，将 `{label-args}` 和 `{milestone-arg}` 原子化传入
 5. 确保 PR 正文包含 `Closes #{issue-number}` 或等价关闭关键字
@@ -55,8 +55,8 @@ Milestone 规则：
 
 ## 创建 PR
 
-- 当前工作属于 active task 时，从 task.md 提取 `issue_number`
-- 如果存在 `issue_number`，先完成代码托管平台检测，再通过 `.agents/rules/issue-pr-commands.md` 查询 Issue
+- 当前工作属于 active task 时，从 task.md 提取 `platform_issue_identity`
+- 如果存在 `platform_issue_identity`，先完成代码托管平台检测，再通过 `.agents/rules/issue-pr-commands.md` 查询 Issue
 - 调用 PR 创建命令前，先检查当前分支是否已有 PR；若已有，报告 PR URL 和状态后停止，不重复执行元数据同步或 summary 发布
 - 使用 HEREDOC 传入 PR 正文
 - 模板中存在 `{$IssueNumber}` 时进行替换
